@@ -1,21 +1,51 @@
 """Task generation from todo files using Claude.
 
 Parses todo.md files and generates task configurations for parallel execution.
+Supports structured outputs via Anthropic SDK when available.
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 import yaml
+from pydantic import BaseModel, Field
 
 from claude_orchestrator.config import Config
 from claude_orchestrator.discovery import ProjectContext
 
+# Check if Anthropic SDK is available
+try:
+    import anthropic
+    HAS_ANTHROPIC = True
+except ImportError:
+    HAS_ANTHROPIC = False
 
+
+# Pydantic models for structured outputs
+class TaskSchema(BaseModel):
+    """Schema for a single task."""
+
+    id: str = Field(description="Short, unique, kebab-case identifier (e.g., 'add-swagger-link')")
+    branch: str = Field(description="Branch name with feature/ prefix (e.g., 'feature/add-swagger-link')")
+    title: str = Field(description="Conventional commit title (e.g., 'feat: add swagger link to docs')")
+    description: str = Field(description="Detailed description with requirements and implementation hints")
+    files_hint: list[str] = Field(default_factory=list, description="List of files likely to be modified")
+    test_command: Optional[str] = Field(default=None, description="pytest command or null for UI-only changes")
+
+
+class TasksConfigSchema(BaseModel):
+    """Schema for all tasks configuration."""
+
+    tasks: list[TaskSchema] = Field(description="List of tasks to generate")
+
+
+# Dataclasses for internal use
 @dataclass
 class TaskConfig:
     """Configuration for a single task."""
@@ -34,9 +64,6 @@ class TasksConfig:
 
     settings: dict = field(default_factory=dict)
     tasks: list[TaskConfig] = field(default_factory=list)
-
-
-import re
 
 
 def _extract_yaml_from_output(output: str) -> Optional[str]:
@@ -187,27 +214,128 @@ Generate the task_config.yaml now:
 """
 
 
-async def generate_tasks_with_claude(
-    todo_path: Path,
+def _build_settings(config: Optional[Config]) -> dict:
+    """Build settings dict from config.
+
+    Args:
+        config: Project configuration
+
+    Returns:
+        Settings dictionary
+    """
+    settings = {
+        "worktree_dir": "../worktrees",
+        "auto_cleanup": True,
+    }
+    if config:
+        settings["base_branch"] = config.git.base_branch
+        settings["destination_branch"] = config.git.destination_branch
+        if config.git.repo_slug:
+            settings["repo_slug"] = config.git.repo_slug
+    return settings
+
+
+async def _generate_with_sdk(
+    todo_content: str,
     project_context: Optional[ProjectContext] = None,
     config: Optional[Config] = None,
 ) -> Optional[TasksConfig]:
-    """Generate task configuration from a todo file using Claude.
+    """Generate tasks using Anthropic SDK with structured outputs.
 
     Args:
-        todo_path: Path to the todo file
+        todo_content: Content of the todo file
         project_context: Discovered project context
         config: Project configuration
 
     Returns:
         TasksConfig or None if generation fails
     """
-    if not todo_path.exists():
+    if not HAS_ANTHROPIC:
         return None
 
-    todo_content = todo_path.read_text()
-    prompt = build_generation_prompt(todo_content, project_context, config)
+    # Build a simpler prompt for structured outputs (no YAML format needed)
+    context_section = ""
+    if project_context:
+        context_section = f"""
+Project: {project_context.project_name}
+Tech Stack: {', '.join(project_context.tech_stack)}
+Test Command: {project_context.test_command or 'Not configured'}
+Key Files: {', '.join(project_context.key_files[:10])}
+"""
 
+    prompt = f"""Analyze this todo list and generate tasks for parallel Claude Code agents.
+
+## Todo List
+{todo_content}
+
+{context_section}
+
+## Guidelines
+- id: Short, kebab-case (e.g., "add-swagger-link")
+- branch: feature/ prefix (e.g., "feature/add-swagger-link")
+- title: Conventional commits (feat:, fix:, refactor:, etc.)
+- description: Be specific with requirements and implementation hints
+- files_hint: List likely files to modify
+- test_command: pytest command or null for UI-only changes
+
+Only include tasks that are NOT already marked as done/completed."""
+
+    try:
+        client = anthropic.Anthropic()
+
+        # Use structured outputs
+        response = client.beta.messages.parse(
+            model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
+            betas=["structured-outputs-2025-11-13"],
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+            output_format=TasksConfigSchema,
+        )
+
+        parsed = response.parsed_output
+        if not parsed or not parsed.tasks:
+            return None
+
+        # Convert to TaskConfig dataclasses
+        tasks = [
+            TaskConfig(
+                id=task.id,
+                branch=task.branch,
+                title=task.title,
+                description=task.description,
+                files_hint=task.files_hint or [],
+                test_command=task.test_command,
+            )
+            for task in parsed.tasks
+        ]
+
+        return TasksConfig(
+            settings=_build_settings(config),
+            tasks=tasks,
+        )
+
+    except Exception:
+        return None
+
+
+async def _generate_with_cli(
+    todo_path: Path,
+    todo_content: str,
+    project_context: Optional[ProjectContext] = None,
+    config: Optional[Config] = None,
+) -> Optional[TasksConfig]:
+    """Generate tasks using Claude CLI (fallback method).
+
+    Args:
+        todo_path: Path to the todo file
+        todo_content: Content of the todo file
+        project_context: Discovered project context
+        config: Project configuration
+
+    Returns:
+        TasksConfig or None if generation fails
+    """
+    prompt = build_generation_prompt(todo_content, project_context, config)
     project_root = todo_path.parent
 
     cmd = [
@@ -227,14 +355,14 @@ async def generate_tasks_with_claude(
 
         stdout, stderr = await asyncio.wait_for(
             process.communicate(),
-            timeout=120,  # 2 minute timeout
+            timeout=300,  # 5 minute timeout for complex prompts
         )
 
         if process.returncode != 0:
             return None
 
         output = stdout.decode().strip()
-        
+
         yaml_str = _extract_yaml_from_output(output)
         if not yaml_str:
             return None
@@ -262,19 +390,8 @@ async def generate_tasks_with_claude(
                 )
             )
 
-        # Build settings from project config (don't trust Claude's generated settings)
-        settings = {
-            "worktree_dir": "../worktrees",
-            "auto_cleanup": True,
-        }
-        if config:
-            settings["base_branch"] = config.git.base_branch
-            settings["destination_branch"] = config.git.destination_branch
-            if config.git.repo_slug:
-                settings["repo_slug"] = config.git.repo_slug
-
         return TasksConfig(
-            settings=settings,
+            settings=_build_settings(config),
             tasks=tasks,
         )
 
@@ -286,10 +403,46 @@ async def generate_tasks_with_claude(
         return None
 
 
+async def generate_tasks_with_claude(
+    todo_path: Path,
+    project_context: Optional[ProjectContext] = None,
+    config: Optional[Config] = None,
+    use_sdk: bool = True,
+) -> Optional[TasksConfig]:
+    """Generate task configuration from a todo file using Claude.
+
+    Uses Anthropic SDK with structured outputs if available,
+    falls back to Claude CLI otherwise.
+
+    Args:
+        todo_path: Path to the todo file
+        project_context: Discovered project context
+        config: Project configuration
+        use_sdk: Whether to try using the SDK first (default: True)
+
+    Returns:
+        TasksConfig or None if generation fails
+    """
+    if not todo_path.exists():
+        return None
+
+    todo_content = todo_path.read_text()
+
+    # Try SDK with structured outputs first (if available and enabled)
+    if use_sdk and HAS_ANTHROPIC and os.getenv("ANTHROPIC_API_KEY"):
+        result = await _generate_with_sdk(todo_content, project_context, config)
+        if result:
+            return result
+
+    # Fallback to CLI
+    return await _generate_with_cli(todo_path, todo_content, project_context, config)
+
+
 def generate_tasks_sync(
     todo_path: Path,
     project_context: Optional[ProjectContext] = None,
     config: Optional[Config] = None,
+    use_sdk: bool = True,
 ) -> Optional[TasksConfig]:
     """Synchronous wrapper for task generation.
 
@@ -297,11 +450,12 @@ def generate_tasks_sync(
         todo_path: Path to the todo file
         project_context: Discovered project context
         config: Project configuration
+        use_sdk: Whether to try using the SDK first (default: True)
 
     Returns:
         TasksConfig or None if generation fails
     """
-    return asyncio.run(generate_tasks_with_claude(todo_path, project_context, config))
+    return asyncio.run(generate_tasks_with_claude(todo_path, project_context, config, use_sdk))
 
 
 def save_tasks_config(tasks_config: TasksConfig, output_path: Path) -> None:

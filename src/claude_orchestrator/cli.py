@@ -271,6 +271,11 @@ def generate(
         "-o",
         help="Output path for task configuration.",
     ),
+    use_sdk: bool = typer.Option(
+        True,
+        "--use-sdk/--no-sdk",
+        help="Use Anthropic SDK with structured outputs (requires ANTHROPIC_API_KEY).",
+    ),
     project_dir: Path = typer.Option(
         Path.cwd(),
         "--project-dir",
@@ -281,7 +286,12 @@ def generate(
     """Generate task configuration from a todo file.
 
     Uses Claude to analyze the todo file and generate task_config.yaml.
+    
+    By default, uses Anthropic SDK with structured outputs if ANTHROPIC_API_KEY
+    is set. Falls back to Claude CLI otherwise.
     """
+    import os
+    
     if not from_todo.exists():
         console.print(f"[red]Error: Todo file not found: {from_todo}[/red]")
         raise typer.Exit(1)
@@ -289,6 +299,12 @@ def generate(
     console.print("[bold]Generating task configuration[/bold]\n")
     console.print(f"  Input: {from_todo}")
     console.print(f"  Output: {output}")
+
+    # Check SDK availability
+    if use_sdk and os.getenv("ANTHROPIC_API_KEY"):
+        console.print("  [dim]Method: Anthropic SDK (structured outputs)[/dim]")
+    else:
+        console.print("  [dim]Method: Claude CLI[/dim]")
 
     # Load config
     config = load_config(project_dir)
@@ -299,7 +315,7 @@ def generate(
 
     # Generate tasks
     console.print("Generating tasks with Claude...")
-    tasks_config = generate_tasks_sync(from_todo, context, config)
+    tasks_config = generate_tasks_sync(from_todo, context, config, use_sdk=use_sdk)
 
     if not tasks_config or not tasks_config.tasks:
         console.print("[red]Error: Failed to generate tasks[/red]")

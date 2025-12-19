@@ -15,15 +15,33 @@ Orchestrator for running parallel Claude Code agents on multiple tasks. Each tas
 ## Installation
 
 ```bash
-# With pip
+# Basic installation (uses Claude CLI)
 pip install claude-code-orchestrator
+
+# With Anthropic SDK for structured outputs (recommended)
+pip install claude-code-orchestrator[sdk]
 
 # With uv
 uv add claude-code-orchestrator
+uv add anthropic  # Optional: for structured outputs
 
 # With pipx (for CLI usage)
 pipx install claude-code-orchestrator
 ```
+
+### Structured Outputs (Recommended)
+
+For better task generation with guaranteed JSON schema compliance:
+
+```bash
+# Set your Anthropic API key
+export ANTHROPIC_API_KEY=your-key-here
+
+# Install with SDK support
+pip install claude-code-orchestrator[sdk]
+```
+
+When `ANTHROPIC_API_KEY` is set, task generation uses Anthropic's structured outputs for more reliable parsing. Falls back to Claude CLI if not configured.
 
 ## Prerequisites
 

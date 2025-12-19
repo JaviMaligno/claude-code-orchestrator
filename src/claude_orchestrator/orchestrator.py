@@ -425,21 +425,27 @@ def _format_json_event_for_log(event: dict) -> str:
         msg = event.get("message", {})
         content = msg.get("content", [])
         lines = []
-        for item in content:
-            if item.get("type") == "tool_use":
-                tool_name = item.get("name", "unknown")
-                tool_input = item.get("input", {})
-                if "command" in tool_input:
-                    cmd = tool_input["command"]
-                    if len(cmd) > 100:
-                        cmd = cmd[:100] + "..."
-                    lines.append(f"[TOOL] {tool_name}: {cmd}")
-                elif "file_path" in tool_input or "path" in tool_input:
-                    path = tool_input.get("file_path") or tool_input.get("path", "")
-                    lines.append(f"[TOOL] {tool_name}: {path}")
-                else:
-                    lines.append(f"[TOOL] {tool_name}")
-            # Skip text - already shown via stream_event
+        if isinstance(content, list):
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "tool_use":
+                    tool_name = item.get("name", "unknown")
+                    tool_input = item.get("input", {})
+                    if isinstance(tool_input, dict):
+                        if "command" in tool_input:
+                            cmd = tool_input["command"]
+                            if len(cmd) > 100:
+                                cmd = cmd[:100] + "..."
+                            lines.append(f"[TOOL] {tool_name}: {cmd}")
+                        elif "file_path" in tool_input or "path" in tool_input:
+                            path = tool_input.get("file_path") or tool_input.get("path", "")
+                            lines.append(f"[TOOL] {tool_name}: {path}")
+                        else:
+                            lines.append(f"[TOOL] {tool_name}")
+                    else:
+                        lines.append(f"[TOOL] {tool_name}")
+                # Skip text - already shown via stream_event
         return "\n".join(lines) + "\n" if lines else ""
 
     elif event_type == "user":
@@ -449,19 +455,34 @@ def _format_json_event_for_log(event: dict) -> str:
 
         # First check tool_use_result.stdout (for Bash and similar tools)
         tool_result = event.get("tool_use_result", {})
-        if tool_result:
+        if tool_result and isinstance(tool_result, dict):
             result_text = tool_result.get("stdout", "")
             tool_name = tool_result.get("tool_name", "")
 
         # Also check message.content for MCP results
         if not result_text:
             content_list = event.get("message", {}).get("content", [])
-            for item in content_list:
-                if item.get("type") == "tool_result":
-                    content = item.get("content", "")
-                    if isinstance(content, str) and content:
-                        result_text = content
-                        break
+            if isinstance(content_list, list):
+                for item in content_list:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") == "tool_result":
+                        content = item.get("content", "")
+                        # Content can be string or list of objects
+                        if isinstance(content, str) and content:
+                            result_text = content
+                            break
+                        elif isinstance(content, list):
+                            # Extract text from list of content objects
+                            texts = []
+                            for c in content:
+                                if isinstance(c, dict) and c.get("type") == "text":
+                                    texts.append(c.get("text", ""))
+                                elif isinstance(c, str):
+                                    texts.append(c)
+                            if texts:
+                                result_text = "\n".join(texts)
+                                break
 
         # Format result with size info for large responses
         if result_text:

@@ -681,6 +681,12 @@ def config(
         if cfg.project.test_command:
             console.print("[dim]# Project[/dim]")
             console.print(f"  project.test_command: {cfg.project.test_command}")
+        console.print("[dim]# Agent Timeouts & Retry[/dim]")
+        console.print(f"  agent.inactivity_timeout: {cfg.agent.inactivity_timeout}")
+        console.print(f"  agent.max_runtime: {cfg.agent.max_runtime}")
+        console.print(f"  agent.max_retries: {cfg.agent.max_retries}")
+        console.print(f"  agent.use_resume: {cfg.agent.use_resume}")
+        console.print(f"  agent.retry_delay: {cfg.agent.retry_delay}")
         console.print()
         return
 
@@ -722,6 +728,16 @@ def config(
             console.print(",".join(cfg.tools.disallowed_tools) if cfg.tools.disallowed_tools else "")
         elif key == "tools.skip_permissions":
             console.print(str(cfg.tools.skip_permissions).lower())
+        elif key == "agent.inactivity_timeout":
+            console.print(cfg.agent.inactivity_timeout)
+        elif key == "agent.max_runtime":
+            console.print(cfg.agent.max_runtime)
+        elif key == "agent.max_retries":
+            console.print(cfg.agent.max_retries)
+        elif key == "agent.use_resume":
+            console.print(str(cfg.agent.use_resume).lower())
+        elif key == "agent.retry_delay":
+            console.print(cfg.agent.retry_delay)
         else:
             console.print(f"[red]Unknown key: {key}[/red]")
         return
@@ -766,6 +782,32 @@ def config(
         cfg.tools.disallowed_tools = [v.strip() for v in value.split(",") if v.strip()]
     elif key == "tools.skip_permissions":
         cfg.tools.skip_permissions = value.lower() in ("true", "1", "yes")
+    elif key == "agent.inactivity_timeout":
+        try:
+            cfg.agent.inactivity_timeout = int(value)
+        except ValueError:
+            console.print(f"[red]Invalid value: {value}. Must be an integer (seconds)[/red]")
+            raise typer.Exit(1)
+    elif key == "agent.max_runtime":
+        try:
+            cfg.agent.max_runtime = int(value)
+        except ValueError:
+            console.print(f"[red]Invalid value: {value}. Must be an integer (seconds)[/red]")
+            raise typer.Exit(1)
+    elif key == "agent.max_retries":
+        try:
+            cfg.agent.max_retries = int(value)
+        except ValueError:
+            console.print(f"[red]Invalid value: {value}. Must be an integer[/red]")
+            raise typer.Exit(1)
+    elif key == "agent.use_resume":
+        cfg.agent.use_resume = value.lower() in ("true", "1", "yes")
+    elif key == "agent.retry_delay":
+        try:
+            cfg.agent.retry_delay = int(value)
+        except ValueError:
+            console.print(f"[red]Invalid value: {value}. Must be an integer (seconds)[/red]")
+            raise typer.Exit(1)
     else:
         console.print(f"[red]Unknown key: {key}[/red]")
         raise typer.Exit(1)

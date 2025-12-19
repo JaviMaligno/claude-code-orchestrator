@@ -2,19 +2,27 @@
 
 Each task runs in its own git worktree with a dedicated agent instance.
 Supports plan mode with manual or automatic approval, and creates PRs on completion.
+
+Features:
+- Inactivity timeout: Detects stuck agents and terminates them
+- Retry with resume: Uses `claude --resume` to continue from where it left off
+- Parallel execution: Run multiple agents simultaneously
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 import shutil
 import subprocess
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from claude_orchestrator.config import Config, load_config
+from claude_orchestrator.config import AgentConfig, Config, load_config
 from claude_orchestrator.discovery import ProjectContext, discover_sync
 from claude_orchestrator.git_provider import (
     GitProvider,
@@ -26,15 +34,29 @@ from claude_orchestrator.task_generator import TaskConfig, TasksConfig, load_tas
 
 
 @dataclass
+class AgentRunResult:
+    """Result of a single agent execution attempt."""
+
+    success: bool
+    exit_code: int
+    session_id: Optional[str] = None  # For claude --resume
+    timeout_type: Optional[str] = None  # "inactivity" or "max_runtime"
+    output_lines: int = 0
+    duration_seconds: float = 0.0
+
+
+@dataclass
 class TaskResult:
     """Result of running a task."""
 
     task_id: str
-    status: str  # "success", "failed", "skipped"
+    status: str  # "success", "failed", "skipped", "timeout"
     branch: str
     worktree_path: Optional[Path] = None
     pr_url: Optional[str] = None
     error: Optional[str] = None
+    attempts: int = 0
+    session_id: Optional[str] = None
 
 
 def run_git(args: list[str], cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
@@ -237,6 +259,124 @@ def build_claude_args(config: Optional[Config], auto_approve: bool = False) -> l
     return args
 
 
+def _extract_session_id(log_content: str) -> Optional[str]:
+    """Extract Claude session ID from log output for resume capability.
+
+    Args:
+        log_content: Content of the log file
+
+    Returns:
+        Session ID if found, None otherwise
+    """
+    # Claude outputs session ID in format: "Session ID: abc123-def456..."
+    # or in JSON output format
+    patterns = [
+        r'Session ID[:\s]+([a-f0-9-]+)',
+        r'"session_id"[:\s]+"([a-f0-9-]+)"',
+        r'--resume\s+([a-f0-9-]+)',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, log_content, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+
+async def _monitor_agent_activity(
+    process: asyncio.subprocess.Process,
+    log_file: Path,
+    agent_config: AgentConfig,
+    task_id: str,
+) -> AgentRunResult:
+    """Monitor agent activity and enforce timeouts.
+
+    Args:
+        process: Running subprocess
+        log_file: Path to log file being written
+        agent_config: Agent timeout/retry configuration
+        task_id: Task identifier for logging
+
+    Returns:
+        AgentRunResult with details about the run
+    """
+    start_time = time.time()
+    last_activity_time = start_time
+    last_log_size = 0
+
+    while process.returncode is None:
+        await asyncio.sleep(5)  # Check every 5 seconds
+
+        current_time = time.time()
+        elapsed = current_time - start_time
+        
+        # Check max runtime
+        if elapsed > agent_config.max_runtime:
+            print(f"[{task_id}] Max runtime ({agent_config.max_runtime}s) exceeded, terminating...")
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+
+            log_content = log_file.read_text() if log_file.exists() else ""
+            return AgentRunResult(
+                success=False,
+                exit_code=-1,
+                session_id=_extract_session_id(log_content),
+                timeout_type="max_runtime",
+                output_lines=log_content.count('\n'),
+                duration_seconds=elapsed,
+            )
+
+        # Check for activity (log file growing)
+        if log_file.exists():
+            current_log_size = log_file.stat().st_size
+            if current_log_size > last_log_size:
+                last_log_size = current_log_size
+                last_activity_time = current_time
+
+        # Check inactivity timeout
+        inactivity_duration = current_time - last_activity_time
+        if inactivity_duration > agent_config.inactivity_timeout:
+            print(f"[{task_id}] No activity for {int(inactivity_duration)}s, terminating...")
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+
+            log_content = log_file.read_text() if log_file.exists() else ""
+            return AgentRunResult(
+                success=False,
+                exit_code=-1,
+                session_id=_extract_session_id(log_content),
+                timeout_type="inactivity",
+                output_lines=log_content.count('\n'),
+                duration_seconds=elapsed,
+            )
+
+        # Check if process finished
+        try:
+            await asyncio.wait_for(process.wait(), timeout=0.1)
+        except asyncio.TimeoutError:
+            pass  # Still running
+
+    # Process completed normally
+    elapsed = time.time() - start_time
+    log_content = log_file.read_text() if log_file.exists() else ""
+    
+    return AgentRunResult(
+        success=process.returncode == 0,
+        exit_code=process.returncode or 0,
+        session_id=_extract_session_id(log_content),
+        timeout_type=None,
+        output_lines=log_content.count('\n'),
+        duration_seconds=elapsed,
+    )
+
+
 async def run_agent(
     task: TaskConfig,
     worktree_path: Path,
@@ -245,8 +385,8 @@ async def run_agent(
     config: Optional[Config] = None,
     auto_approve: bool = False,
     log_file: Optional[Path] = None,
-) -> bool:
-    """Run Claude Code agent for a task.
+) -> AgentRunResult:
+    """Run Claude Code agent for a task with activity monitoring.
 
     Args:
         task: Task configuration
@@ -258,40 +398,157 @@ async def run_agent(
         log_file: Path to write agent output
 
     Returns:
-        True if agent completed successfully
+        AgentRunResult with success status and session info
     """
     prompt = build_agent_prompt(task, provider_status, project_context, config)
+    agent_config = config.agent if config else AgentConfig()
 
     # Build claude command with tools/permissions config
     cmd = ["claude"]
     cmd.extend(build_claude_args(config, auto_approve))
     cmd.extend(["--print", "--verbose", "-p", prompt])
 
-    # Open log file if specified
-    log_handle = open(log_file, "w") if log_file else None
+    # Ensure log file exists for monitoring
+    if log_file:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        log_file.touch()
+    else:
+        # Create temp log file for monitoring
+        log_file = worktree_path / ".claude-agent.log"
+        log_file.touch()
+
+    log_handle = open(log_file, "w")
+    start_time = time.time()
 
     try:
         process = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=worktree_path,
-            stdout=log_handle or asyncio.subprocess.PIPE,
+            stdout=log_handle,
             stderr=asyncio.subprocess.STDOUT,
             stdin=asyncio.subprocess.DEVNULL if auto_approve else None,
         )
 
         if not auto_approve:
-            # Interactive mode - agent handles its own I/O
+            # Interactive mode - no monitoring, just wait
             await process.wait()
-        else:
-            # Auto-approve mode - capture output
-            stdout, _ = await process.communicate()
-            if log_handle and stdout:
-                log_handle.write(stdout.decode() if isinstance(stdout, bytes) else stdout)
+            elapsed = time.time() - start_time
+            log_handle.close()
+            log_content = log_file.read_text() if log_file.exists() else ""
+            return AgentRunResult(
+                success=process.returncode == 0,
+                exit_code=process.returncode or 0,
+                session_id=_extract_session_id(log_content),
+                output_lines=log_content.count('\n'),
+                duration_seconds=elapsed,
+            )
 
-        return process.returncode == 0
+        # Auto-approve mode with activity monitoring
+        log_handle.close()  # Let the monitor read the file
+        
+        # Re-open in append mode for subprocess
+        log_handle = open(log_file, "a")
+        
+        result = await _monitor_agent_activity(
+            process, log_file, agent_config, task.id
+        )
+        return result
 
+    except Exception as e:
+        elapsed = time.time() - start_time
+        return AgentRunResult(
+            success=False,
+            exit_code=-1,
+            timeout_type=None,
+            duration_seconds=elapsed,
+        )
     finally:
-        if log_handle:
+        if log_handle and not log_handle.closed:
+            log_handle.close()
+
+
+async def run_agent_with_resume(
+    task: TaskConfig,
+    worktree_path: Path,
+    provider_status: GitProviderStatus,
+    session_id: str,
+    config: Optional[Config] = None,
+    auto_approve: bool = False,
+    log_file: Optional[Path] = None,
+) -> AgentRunResult:
+    """Resume a Claude Code agent session.
+
+    Args:
+        task: Task configuration
+        worktree_path: Path to the worktree
+        provider_status: Git provider status
+        session_id: Previous session ID to resume
+        config: Project configuration
+        auto_approve: Whether to auto-approve the plan
+        log_file: Path to write agent output
+
+    Returns:
+        AgentRunResult with success status
+    """
+    agent_config = config.agent if config else AgentConfig()
+    
+    # Build resume command
+    cmd = ["claude"]
+    cmd.extend(build_claude_args(config, auto_approve))
+    cmd.extend(["--resume", session_id, "--print", "--verbose"])
+
+    if log_file:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        # Append to existing log
+        with open(log_file, "a") as f:
+            f.write(f"\n\n--- RETRY (resuming session {session_id}) ---\n\n")
+    else:
+        log_file = worktree_path / ".claude-agent.log"
+
+    log_handle = open(log_file, "a")
+    start_time = time.time()
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=worktree_path,
+            stdout=log_handle,
+            stderr=asyncio.subprocess.STDOUT,
+            stdin=asyncio.subprocess.DEVNULL if auto_approve else None,
+        )
+
+        if not auto_approve:
+            await process.wait()
+            elapsed = time.time() - start_time
+            log_handle.close()
+            log_content = log_file.read_text() if log_file.exists() else ""
+            return AgentRunResult(
+                success=process.returncode == 0,
+                exit_code=process.returncode or 0,
+                session_id=session_id,
+                output_lines=log_content.count('\n'),
+                duration_seconds=elapsed,
+            )
+
+        log_handle.close()
+        result = await _monitor_agent_activity(
+            process, log_file, agent_config, task.id
+        )
+        # Preserve session ID for next retry
+        if not result.session_id:
+            result.session_id = session_id
+        return result
+
+    except Exception as e:
+        elapsed = time.time() - start_time
+        return AgentRunResult(
+            success=False,
+            exit_code=-1,
+            session_id=session_id,
+            duration_seconds=elapsed,
+        )
+    finally:
+        if log_handle and not log_handle.closed:
             log_handle.close()
 
 
@@ -319,7 +576,7 @@ async def run_task(
     no_pr: bool = False,
     logs_dir: Optional[Path] = None,
 ) -> TaskResult:
-    """Run a single task end-to-end.
+    """Run a single task end-to-end with retry support.
 
     Args:
         task: Task configuration
@@ -337,6 +594,7 @@ async def run_task(
     repo_root = config.project_root or Path.cwd()
     worktree_dir = repo_root / config.worktree_dir
     worktree_path = None
+    agent_config = config.agent
 
     try:
         # Create worktree
@@ -369,26 +627,77 @@ async def run_task(
                 error="Dry run",
             )
 
-        success = await run_agent(
-            task,
-            worktree_path,
-            provider_status,
-            project_context,
-            config,
-            auto_approve=auto_approve,
-            log_file=log_file,
-        )
+        # Run agent with retry support
+        attempt = 0
+        max_attempts = agent_config.max_retries + 1
+        session_id: Optional[str] = None
+        last_result: Optional[AgentRunResult] = None
 
-        if not success:
-            return TaskResult(
-                task_id=task.id,
-                status="failed",
-                branch=task.branch,
-                worktree_path=worktree_path,
-                error="Agent failed - check logs",
-            )
+        while attempt < max_attempts:
+            attempt += 1
+            
+            if attempt > 1:
+                print(f"[{task.id}] Retry {attempt - 1}/{agent_config.max_retries}...")
+                await asyncio.sleep(agent_config.retry_delay)
 
-        # Push branch
+            if session_id and agent_config.use_resume:
+                # Resume previous session
+                print(f"[{task.id}] Resuming session {session_id[:8]}...")
+                result = await run_agent_with_resume(
+                    task,
+                    worktree_path,
+                    provider_status,
+                    session_id,
+                    config,
+                    auto_approve=auto_approve,
+                    log_file=log_file,
+                )
+            else:
+                # Fresh start
+                result = await run_agent(
+                    task,
+                    worktree_path,
+                    provider_status,
+                    project_context,
+                    config,
+                    auto_approve=auto_approve,
+                    log_file=log_file,
+                )
+
+            last_result = result
+
+            if result.success:
+                print(f"[{task.id}] Agent completed successfully in {result.duration_seconds:.1f}s")
+                break
+
+            # Handle failure
+            if result.timeout_type:
+                print(f"[{task.id}] Agent timed out ({result.timeout_type}) after {result.duration_seconds:.1f}s")
+                if result.session_id:
+                    session_id = result.session_id
+                    print(f"[{task.id}] Session ID captured for resume: {session_id[:8]}...")
+            else:
+                print(f"[{task.id}] Agent failed with exit code {result.exit_code}")
+                # For non-timeout failures, still try to get session ID
+                if result.session_id:
+                    session_id = result.session_id
+
+            if attempt >= max_attempts:
+                error_msg = f"Agent failed after {attempt} attempt(s)"
+                if result.timeout_type:
+                    error_msg = f"Agent timed out ({result.timeout_type}) after {attempt} attempt(s)"
+                
+                return TaskResult(
+                    task_id=task.id,
+                    status="timeout" if result.timeout_type else "failed",
+                    branch=task.branch,
+                    worktree_path=worktree_path,
+                    error=error_msg,
+                    attempts=attempt,
+                    session_id=session_id,
+                )
+
+        # Agent succeeded - push branch
         print(f"[{task.id}] Pushing branch to origin...")
         if not push_branch(task.branch, worktree_path):
             return TaskResult(
@@ -397,6 +706,8 @@ async def run_task(
                 branch=task.branch,
                 worktree_path=worktree_path,
                 error="Failed to push branch",
+                attempts=attempt,
+                session_id=session_id,
             )
 
         # Note: PR creation is now handled by the agent using MCP or gh CLI
@@ -405,6 +716,8 @@ async def run_task(
             status="success",
             branch=task.branch,
             worktree_path=worktree_path,
+            attempts=attempt,
+            session_id=session_id,
         )
 
     except Exception as e:
@@ -433,6 +746,8 @@ def save_state(results: list[TaskResult], state_file: Path) -> None:
                 "branch": r.branch,
                 "pr_url": r.pr_url,
                 "error": r.error,
+                "attempts": r.attempts,
+                "session_id": r.session_id,
             }
             for r in results
         ],
@@ -452,16 +767,32 @@ def print_summary(results: list[TaskResult]) -> None:
     print("=" * 60)
 
     for result in results:
-        status_emoji = {"success": "✓", "failed": "✗", "skipped": "○"}.get(result.status, "?")
+        status_emoji = {
+            "success": "✓",
+            "failed": "✗",
+            "skipped": "○",
+            "timeout": "⏱",
+        }.get(result.status, "?")
         print(f"\n{status_emoji} {result.task_id} ({result.branch})")
         print(f"  Status: {result.status}")
+        if result.attempts > 1:
+            print(f"  Attempts: {result.attempts}")
         if result.pr_url:
             print(f"  PR: {result.pr_url}")
         if result.error:
             print(f"  Error: {result.error}")
+        if result.session_id and result.status in ("failed", "timeout"):
+            print(f"  Session ID (for manual resume): {result.session_id}")
 
     success_count = sum(1 for r in results if r.status == "success")
+    timeout_count = sum(1 for r in results if r.status == "timeout")
+    failed_count = sum(1 for r in results if r.status == "failed")
+    
     print(f"\n{success_count}/{len(results)} tasks completed successfully")
+    if timeout_count:
+        print(f"{timeout_count} task(s) timed out")
+    if failed_count:
+        print(f"{failed_count} task(s) failed")
 
 
 async def run_tasks(

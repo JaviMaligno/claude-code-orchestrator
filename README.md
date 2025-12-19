@@ -212,6 +212,11 @@ Available keys:
 - `tools.allowed_tools` - Comma-separated tool patterns (Bash(git:*), Edit, Read)
 - `tools.disallowed_tools` - Comma-separated tool patterns to deny
 - `tools.skip_permissions` - Skip all permissions (true/false, DANGEROUS)
+- `agent.inactivity_timeout` - Seconds without output before timeout (default: 300)
+- `agent.max_runtime` - Maximum seconds per task (default: 3600)
+- `agent.max_retries` - Number of retry attempts (default: 2)
+- `agent.use_resume` - Use `claude --resume` for retries (true/false)
+- `agent.retry_delay` - Seconds to wait between retries (default: 5)
 
 ### `run`
 
@@ -366,6 +371,75 @@ You have two options for tool configuration:
    - Applies to all Claude Code sessions in that project
    - Good for general project instructions
    - Not specific to orchestrator tasks
+
+## Agent Timeouts & Retry
+
+Agents can get stuck or hang. The orchestrator monitors agent activity and can automatically retry with session resume.
+
+### How It Works
+
+1. **Activity Monitoring**: Checks if the log file is growing (agent is producing output)
+2. **Inactivity Timeout**: If no output for N seconds, terminate the agent
+3. **Retry with Resume**: Use `claude --resume <session_id>` to continue from where it left off
+4. **Max Runtime**: Hard limit on total agent execution time
+
+### Configuration
+
+```bash
+# Set inactivity timeout (default: 300s = 5 minutes)
+claude-orchestrator config agent.inactivity_timeout 300
+
+# Set max runtime per task (default: 3600s = 1 hour)
+claude-orchestrator config agent.max_runtime 3600
+
+# Set number of retries (default: 2)
+claude-orchestrator config agent.max_retries 2
+
+# Enable/disable session resume (default: true)
+claude-orchestrator config agent.use_resume true
+
+# Delay between retries (default: 5s)
+claude-orchestrator config agent.retry_delay 5
+```
+
+### In `.claude-orchestrator.yaml`
+
+```yaml
+agent:
+  inactivity_timeout: 300  # 5 minutes no output = stuck
+  max_runtime: 3600        # 1 hour max per task
+  max_retries: 2           # Try up to 3 times total
+  use_resume: true         # Resume from session state
+  retry_delay: 5           # Wait 5s between retries
+```
+
+### Execution Summary
+
+After running tasks, you'll see retry information:
+
+```
+EXECUTION SUMMARY
+================
+
+✓ task-1 (feature/task-1)
+  Status: success
+  Attempts: 1
+
+⏱ task-2 (feature/task-2)
+  Status: timeout
+  Attempts: 3
+  Error: Agent timed out (inactivity) after 3 attempt(s)
+  Session ID (for manual resume): abc123-def456
+```
+
+### Manual Resume
+
+If a task times out after all retries, you can manually resume:
+
+```bash
+cd path/to/worktree
+claude --resume abc123-def456
+```
 
 ## Optional MCPs
 

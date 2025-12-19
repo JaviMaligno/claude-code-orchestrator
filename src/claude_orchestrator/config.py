@@ -33,6 +33,28 @@ class GitConfig:
 
 
 @dataclass
+class AgentConfig:
+    """Agent execution configuration."""
+
+    # Inactivity timeout in seconds (no output = agent is stuck)
+    # Default: 300s (5 minutes)
+    inactivity_timeout: int = 300
+    
+    # Total timeout for an agent task in seconds
+    # Default: 3600s (1 hour)
+    max_runtime: int = 3600
+    
+    # Number of retry attempts on timeout or failure
+    max_retries: int = 2
+    
+    # Whether to use claude --resume for retries (preserves session state)
+    use_resume: bool = True
+    
+    # Delay between retries in seconds
+    retry_delay: int = 5
+
+
+@dataclass
 class WorkflowConfig:
     """Workflow mode configuration."""
 
@@ -101,6 +123,7 @@ class Config:
     project: ProjectConfig = field(default_factory=ProjectConfig)
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
 
     # Runtime settings (not persisted)
     project_root: Optional[Path] = None
@@ -256,6 +279,17 @@ def load_config(project_root: Optional[Path] = None) -> Config:
             skip_permissions=tools_data.get("skip_permissions", False),
         )
 
+    # Parse agent config
+    if "agent" in data:
+        agent_data = data["agent"]
+        config.agent = AgentConfig(
+            inactivity_timeout=agent_data.get("inactivity_timeout", 300),
+            max_runtime=agent_data.get("max_runtime", 3600),
+            max_retries=agent_data.get("max_retries", 2),
+            use_resume=agent_data.get("use_resume", True),
+            retry_delay=agent_data.get("retry_delay", 5),
+        )
+
     return config
 
 
@@ -341,6 +375,21 @@ def save_config(config: Config, project_root: Optional[Path] = None) -> None:
         tools_data["skip_permissions"] = config.tools.skip_permissions
     if tools_data:
         data["tools"] = tools_data
+
+    # Agent config (only save non-default values)
+    agent_data: dict[str, Any] = {}
+    if config.agent.inactivity_timeout != 300:
+        agent_data["inactivity_timeout"] = config.agent.inactivity_timeout
+    if config.agent.max_runtime != 3600:
+        agent_data["max_runtime"] = config.agent.max_runtime
+    if config.agent.max_retries != 2:
+        agent_data["max_retries"] = config.agent.max_retries
+    if not config.agent.use_resume:
+        agent_data["use_resume"] = config.agent.use_resume
+    if config.agent.retry_delay != 5:
+        agent_data["retry_delay"] = config.agent.retry_delay
+    if agent_data:
+        data["agent"] = agent_data
 
     with open(config_path, "w") as f:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)

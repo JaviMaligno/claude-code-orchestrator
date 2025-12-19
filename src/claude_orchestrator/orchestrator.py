@@ -145,6 +145,90 @@ def cleanup_worktree(branch: str, worktree_dir: Path, repo_root: Path | None = N
         run_git(["worktree", "remove", "--force", str(worktree_path)], cwd=repo_root)
 
 
+def cleanup_all_worktrees(repo_root: Path | None = None, worktree_dir: str = "../worktrees") -> int:
+    """Remove all orchestrator-created worktrees.
+
+    Cleans up worktrees that match orchestrator naming patterns:
+    - task-* (from run phase)
+    - review-pr-* (from review phase)
+    - feature/* (legacy)
+
+    Args:
+        repo_root: Root of the repository
+        worktree_dir: Relative path to worktrees directory
+
+    Returns:
+        Number of worktrees cleaned up
+    """
+    if repo_root is None:
+        repo_root = Path.cwd()
+
+    # Determine worktree base path
+    if worktree_dir.startswith("../"):
+        worktree_base = repo_root.parent / worktree_dir[3:]
+    elif worktree_dir.startswith("./"):
+        worktree_base = repo_root / worktree_dir[2:]
+    else:
+        worktree_base = (
+            Path(worktree_dir) if worktree_dir.startswith("/") else repo_root / worktree_dir
+        )
+
+    if not worktree_base.exists():
+        return 0
+
+    cleaned = 0
+    # Get list of worktrees from git
+    result = run_git(["worktree", "list", "--porcelain"], cwd=repo_root)
+    if result.returncode != 0:
+        return 0
+
+    # Parse worktree list
+    worktree_paths = []
+    for line in result.stdout.split("\n"):
+        if line.startswith("worktree "):
+            path = Path(line.replace("worktree ", "").strip())
+            # Only clean orchestrator worktrees (not the main repo)
+            if path != repo_root and str(worktree_base) in str(path):
+                worktree_paths.append(path)
+
+    # Also check directory for any orphaned worktrees
+    if worktree_base.exists():
+        for item in worktree_base.iterdir():
+            if item.is_dir() and item not in worktree_paths:
+                worktree_paths.append(item)
+
+    # Clean each worktree
+    for wt_path in worktree_paths:
+        try:
+            run_git(["worktree", "remove", "--force", str(wt_path)], cwd=repo_root)
+            cleaned += 1
+        except Exception:
+            # Try removing directory directly if git worktree remove fails
+            try:
+                shutil.rmtree(wt_path)
+                cleaned += 1
+            except Exception:
+                pass
+
+    # Prune worktree references
+    run_git(["worktree", "prune"], cwd=repo_root)
+
+    # Clean up empty directories in worktree base
+    if worktree_base.exists():
+        for item in worktree_base.iterdir():
+            if item.is_dir():
+                try:
+                    # Check if directory is empty or only has .git file
+                    contents = list(item.iterdir())
+                    if not contents or (len(contents) == 1 and contents[0].name == ".git"):
+                        shutil.rmtree(item)
+                        cleaned += 1
+                except Exception:
+                    pass
+
+    return cleaned
+
+
 def build_agent_prompt(
     task: TaskConfig,
     provider_status: GitProviderStatus,

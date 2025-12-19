@@ -29,7 +29,7 @@ from claude_orchestrator.git_provider import (
     get_provider_status,
 )
 from claude_orchestrator.mcp_registry import AuthType, get_mcp_status
-from claude_orchestrator.orchestrator import run_tasks_sync
+from claude_orchestrator.orchestrator import cleanup_all_worktrees, run_tasks_sync
 from claude_orchestrator.reviewer import (
     PRInfo,
     ReviewResult,
@@ -1140,6 +1140,75 @@ def _print_review_summary(results: list[ReviewResult]) -> None:
     console.print(f"\n{approved}/{len(results)} PRs reviewed successfully")
     if failed > 0:
         console.print(f"[red]{failed} PR(s) failed review[/red]")
+
+
+@app.command()
+def cleanup(
+    project_dir: Path = typer.Option(
+        Path.cwd(),
+        "--project-dir",
+        "-d",
+        help="Project directory.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Force cleanup without confirmation.",
+    ),
+):
+    """Clean up all orchestrator worktrees.
+
+    Removes all worktrees created by the orchestrator:
+    - task-* worktrees from run phase
+    - review-pr-* worktrees from review phase
+    - Any orphaned worktrees in the worktrees directory
+
+    Also prunes stale worktree references from git.
+
+    Examples:
+        claude-orchestrator cleanup           # Interactive confirmation
+        claude-orchestrator cleanup --force   # No confirmation
+    """
+    config = load_config(project_dir)
+    worktree_dir = config.worktree_dir
+
+    # Determine worktree base path for display
+    if worktree_dir.startswith("../"):
+        worktree_base = project_dir.parent / worktree_dir[3:]
+    elif worktree_dir.startswith("./"):
+        worktree_base = project_dir / worktree_dir[2:]
+    else:
+        worktree_base = (
+            Path(worktree_dir) if worktree_dir.startswith("/") else project_dir / worktree_dir
+        )
+
+    console.print("\n[bold]Cleanup Worktrees[/bold]")
+    console.print(f"Directory: {worktree_base}\n")
+
+    if not worktree_base.exists():
+        console.print("[dim]No worktrees directory found.[/dim]")
+        return
+
+    # List existing worktrees
+    if worktree_base.exists():
+        items = list(worktree_base.iterdir())
+        if items:
+            console.print("Found worktrees:")
+            for item in items:
+                if item.is_dir():
+                    console.print(f"  - {item.name}")
+        else:
+            console.print("[dim]No worktrees to clean up.[/dim]")
+            return
+
+    if not force:
+        if not typer.confirm("\nRemove all worktrees?"):
+            console.print("[dim]Cancelled.[/dim]")
+            return
+
+    cleaned = cleanup_all_worktrees(project_dir, worktree_dir)
+    console.print(f"\n[green]✓[/green] Cleaned up {cleaned} worktree(s)")
 
 
 @app.command()

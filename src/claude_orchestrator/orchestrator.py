@@ -282,20 +282,75 @@ def _extract_session_id(log_content: str) -> Optional[str]:
     return None
 
 
+def _format_json_event_for_log(event: dict) -> str:
+    """Convert a stream-json event to human-readable log text.
+
+    Args:
+        event: Parsed JSON event from claude stream-json output
+
+    Returns:
+        Human-readable string for logging
+    """
+    event_type = event.get("type", "unknown")
+    
+    if event_type == "system" and event.get("subtype") == "init":
+        session_id = event.get("session_id", "unknown")
+        model = event.get("model", "unknown")
+        return f"[INIT] Session: {session_id[:8]}... Model: {model}\n"
+    
+    elif event_type == "assistant":
+        msg = event.get("message", {})
+        content = msg.get("content", [])
+        lines = []
+        for item in content:
+            if item.get("type") == "text":
+                lines.append(item.get("text", ""))
+            elif item.get("type") == "tool_use":
+                tool_name = item.get("name", "unknown")
+                tool_input = item.get("input", {})
+                if "command" in tool_input:
+                    lines.append(f"[TOOL] {tool_name}: {tool_input['command']}")
+                elif "description" in tool_input:
+                    lines.append(f"[TOOL] {tool_name}: {tool_input['description']}")
+                else:
+                    lines.append(f"[TOOL] {tool_name}")
+        return "\n".join(lines) + "\n" if lines else ""
+    
+    elif event_type == "user":
+        # Tool result
+        tool_result = event.get("tool_use_result", {})
+        if tool_result:
+            stdout = tool_result.get("stdout", "")
+            if stdout and len(stdout) > 200:
+                stdout = stdout[:200] + "..."
+            if stdout:
+                return f"[RESULT] {stdout}\n"
+        return ""
+    
+    elif event_type == "result":
+        result = event.get("result", "")
+        if len(result) > 500:
+            result = result[:500] + "..."
+        duration = event.get("duration_ms", 0) / 1000
+        return f"\n[COMPLETE] Duration: {duration:.1f}s\n{result}\n"
+    
+    return ""
+
+
 async def _stream_and_monitor(
     process: asyncio.subprocess.Process,
     log_file: Path,
     agent_config: AgentConfig,
     task_id: str,
 ) -> AgentRunResult:
-    """Stream subprocess output to file while monitoring for timeouts.
+    """Stream subprocess JSON output to file while monitoring for timeouts.
 
-    Uses read() with timeout instead of readline() since claude --print
-    may not output complete lines until the end.
+    Processes stream-json format from claude CLI, extracting human-readable
+    logs and detecting activity in real-time.
 
     Args:
-        process: Running subprocess with stdout=PIPE
-        log_file: Path to write output
+        process: Running subprocess with stdout=PIPE (stream-json format)
+        log_file: Path to write human-readable output
         agent_config: Agent timeout/retry configuration
         task_id: Task identifier for logging
 
@@ -304,16 +359,18 @@ async def _stream_and_monitor(
     """
     start_time = time.time()
     last_activity_time = start_time
-    total_bytes_read = 0
+    event_count = 0
+    session_id: Optional[str] = None
+    line_buffer = b""
 
-    async def read_and_write():
-        """Read from subprocess stdout in chunks and write to file."""
-        nonlocal last_activity_time, total_bytes_read
+    async def read_and_process():
+        """Read JSON lines from subprocess and convert to human-readable log."""
+        nonlocal last_activity_time, event_count, session_id, line_buffer
         
-        with open(log_file, "wb") as f:
+        with open(log_file, "w") as f:
             while True:
                 try:
-                    # Read chunks (not lines) with timeout
+                    # Read chunks with timeout
                     chunk = await asyncio.wait_for(
                         process.stdout.read(4096),
                         timeout=2.0
@@ -321,13 +378,33 @@ async def _stream_and_monitor(
                     if not chunk:
                         break  # EOF
                     
-                    f.write(chunk)
-                    f.flush()  # Ensure we write immediately
-                    total_bytes_read += len(chunk)
+                    # Update activity time
                     last_activity_time = time.time()
                     
+                    # Add to buffer and process complete lines
+                    line_buffer += chunk
+                    while b"\n" in line_buffer:
+                        line, line_buffer = line_buffer.split(b"\n", 1)
+                        try:
+                            event = json.loads(line.decode())
+                            event_count += 1
+                            
+                            # Extract session_id from init event
+                            if event.get("type") == "system" and event.get("subtype") == "init":
+                                session_id = event.get("session_id")
+                            
+                            # Convert to human-readable and write
+                            readable = _format_json_event_for_log(event)
+                            if readable:
+                                f.write(readable)
+                                f.flush()
+                                
+                        except json.JSONDecodeError:
+                            # Not valid JSON, write raw
+                            f.write(line.decode() + "\n")
+                            f.flush()
+                    
                 except asyncio.TimeoutError:
-                    # No data available, check if process is still running
                     if process.returncode is not None:
                         break
                     continue
@@ -336,34 +413,36 @@ async def _stream_and_monitor(
 
     async def monitor_timeouts():
         """Monitor for inactivity and max runtime timeouts."""
+        last_reported_minute = 0
         while process.returncode is None:
-            await asyncio.sleep(5)  # Check every 5 seconds
+            await asyncio.sleep(5)
             
             current_time = time.time()
             elapsed = current_time - start_time
             
             # Check max runtime
             if elapsed > agent_config.max_runtime:
-                print(f"[{task_id}] Max runtime ({agent_config.max_runtime}s) exceeded after {total_bytes_read} bytes, terminating...")
+                print(f"[{task_id}] Max runtime ({agent_config.max_runtime}s) exceeded after {event_count} events, terminating...")
                 return "max_runtime"
             
             # Check inactivity timeout
             inactivity_duration = current_time - last_activity_time
             if inactivity_duration > agent_config.inactivity_timeout:
-                print(f"[{task_id}] No activity for {int(inactivity_duration)}s ({total_bytes_read} bytes total), terminating...")
+                print(f"[{task_id}] No activity for {int(inactivity_duration)}s ({event_count} events total), terminating...")
                 return "inactivity"
             
-            # Log progress periodically
-            if int(elapsed) % 60 == 0 and int(elapsed) > 0:
-                print(f"[{task_id}] Running for {int(elapsed)}s, {total_bytes_read} bytes output...")
+            # Log progress every minute
+            current_minute = int(elapsed) // 60
+            if current_minute > last_reported_minute:
+                last_reported_minute = current_minute
+                print(f"[{task_id}] Running for {int(elapsed)}s, {event_count} events received...")
         
-        return None  # Process finished normally
+        return None
 
     # Run reader and monitor concurrently
-    reader_task = asyncio.create_task(read_and_write())
+    reader_task = asyncio.create_task(read_and_process())
     monitor_task = asyncio.create_task(monitor_timeouts())
 
-    # Wait for either completion or timeout
     done, pending = await asyncio.wait(
         [reader_task, monitor_task],
         return_when=asyncio.FIRST_COMPLETED
@@ -371,11 +450,9 @@ async def _stream_and_monitor(
 
     timeout_type = None
     
-    # Check if monitor detected a timeout
     if monitor_task in done:
         timeout_type = monitor_task.result()
         if timeout_type:
-            # Timeout occurred - terminate process
             process.terminate()
             try:
                 await asyncio.wait_for(process.wait(), timeout=10)
@@ -383,14 +460,12 @@ async def _stream_and_monitor(
                 process.kill()
                 await process.wait()
             
-            # Cancel the reader
             reader_task.cancel()
             try:
                 await reader_task
             except asyncio.CancelledError:
                 pass
 
-    # If reader finished first, wait for process and cancel monitor
     if reader_task in done:
         monitor_task.cancel()
         try:
@@ -399,7 +474,6 @@ async def _stream_and_monitor(
             pass
         await process.wait()
 
-    # Wait for any remaining pending tasks
     for task in pending:
         task.cancel()
         try:
@@ -413,7 +487,7 @@ async def _stream_and_monitor(
     return AgentRunResult(
         success=process.returncode == 0 if timeout_type is None else False,
         exit_code=process.returncode or -1,
-        session_id=_extract_session_id(log_content),
+        session_id=session_id or _extract_session_id(log_content),
         timeout_type=timeout_type,
         output_lines=log_content.count('\n'),
         duration_seconds=elapsed,
@@ -449,7 +523,12 @@ async def run_agent(
     # Build claude command with tools/permissions config
     cmd = ["claude"]
     cmd.extend(build_claude_args(config, auto_approve))
-    cmd.extend(["--print", "--verbose", "-p", prompt])
+    
+    # Use stream-json for real-time monitoring in auto-approve mode
+    if auto_approve:
+        cmd.extend(["--print", "--output-format", "stream-json", "--verbose", "-p", prompt])
+    else:
+        cmd.extend(["--print", "--verbose", "-p", prompt])
 
     # Ensure log file exists for monitoring
     if log_file:
@@ -535,43 +614,51 @@ async def run_agent_with_resume(
     # Build resume command
     cmd = ["claude"]
     cmd.extend(build_claude_args(config, auto_approve))
-    cmd.extend(["--resume", session_id, "--print", "--verbose"])
+    
+    # Use stream-json for real-time monitoring in auto-approve mode
+    if auto_approve:
+        cmd.extend(["--resume", session_id, "--print", "--output-format", "stream-json", "--verbose"])
+    else:
+        cmd.extend(["--resume", session_id, "--print", "--verbose"])
 
     if log_file:
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        # Append to existing log
+        # Append retry marker to existing log
         with open(log_file, "a") as f:
             f.write(f"\n\n--- RETRY (resuming session {session_id}) ---\n\n")
     else:
         log_file = worktree_path / ".claude-agent.log"
 
-    log_handle = open(log_file, "a")
     start_time = time.time()
 
     try:
         process = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=worktree_path,
-            stdout=log_handle,
+            stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             stdin=asyncio.subprocess.DEVNULL if auto_approve else None,
         )
 
         if not auto_approve:
-            await process.wait()
+            stdout, _ = await process.communicate()
             elapsed = time.time() - start_time
-            log_handle.close()
-            log_content = log_file.read_text() if log_file.exists() else ""
+            output_text = stdout.decode() if stdout else ""
+            
+            # Append to log file
+            with open(log_file, "a") as f:
+                f.write(output_text)
+            
             return AgentRunResult(
                 success=process.returncode == 0,
                 exit_code=process.returncode or 0,
                 session_id=session_id,
-                output_lines=log_content.count('\n'),
+                output_lines=output_text.count('\n'),
                 duration_seconds=elapsed,
             )
 
-        log_handle.close()
-        result = await _monitor_agent_activity(
+        # Auto-approve mode with stream monitoring
+        result = await _stream_and_monitor(
             process, log_file, agent_config, task.id
         )
         # Preserve session ID for next retry

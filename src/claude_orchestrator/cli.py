@@ -52,6 +52,51 @@ app = typer.Typer(
 console = Console()
 
 
+def validate_and_prompt_config(config: Config, project_dir: Path) -> Config:
+    """Validate config and prompt for missing required values.
+
+    Shows auto-detected values and prompts for any that couldn't be detected.
+
+    Args:
+        config: Loaded configuration
+        project_dir: Project directory
+
+    Returns:
+        Updated config with user-provided values
+    """
+    needs_save = False
+
+    # Check repo_slug (required for Bitbucket)
+    provider_status = get_provider_status(str(project_dir))
+    if provider_status.provider == GitProvider.BITBUCKET and not config.git.repo_slug:
+        console.print("[yellow]⚠ Could not auto-detect repo_slug from git remote[/yellow]")
+        config.git.repo_slug = typer.prompt("Enter Bitbucket repository slug")
+        needs_save = True
+
+    # Check base_branch
+    if not config.git.base_branch or config.git.base_branch == "main":
+        # Show what was detected
+        detected = config.git.base_branch
+        console.print(f"[dim]Auto-detected base_branch: {detected}[/dim]")
+        if not typer.confirm(f"Use '{detected}' as base branch?", default=True):
+            config.git.base_branch = typer.prompt("Enter base branch", default=detected)
+            config.git.destination_branch = config.git.base_branch
+            needs_save = True
+
+    # Show summary of auto-detected config
+    console.print("\n[bold]Configuration:[/bold]")
+    console.print(f"  repo_slug: [cyan]{config.git.repo_slug}[/cyan]")
+    console.print(f"  base_branch: [cyan]{config.git.base_branch}[/cyan]")
+    console.print(f"  destination_branch: [cyan]{config.git.destination_branch}[/cyan]")
+
+    # Save if modified
+    if needs_save:
+        save_config(config, project_dir)
+        console.print("[green]✓ Configuration saved[/green]\n")
+
+    return config
+
+
 def version_callback(value: bool):
     if value:
         console.print(f"claude-orchestrator version {__version__}")
@@ -422,6 +467,10 @@ def run(
     """
     # Load project config early for workflow settings
     config = load_config(project_dir)
+
+    # Validate and prompt for missing config (unless dry-run)
+    if not dry_run:
+        config = validate_and_prompt_config(config, project_dir)
 
     # YOLO mode overrides everything
     if yolo:
@@ -1152,6 +1201,10 @@ def review(
         claude-orchestrator review --automerge # Auto-merge after review
     """
     config = load_config(project_dir)
+
+    # Validate and prompt for missing config
+    config = validate_and_prompt_config(config, project_dir)
+
     provider_status = get_provider_status(str(project_dir))
 
     if not provider_status.is_ready:

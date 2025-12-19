@@ -282,17 +282,20 @@ def _extract_session_id(log_content: str) -> Optional[str]:
     return None
 
 
-async def _monitor_agent_activity(
+async def _stream_and_monitor(
     process: asyncio.subprocess.Process,
     log_file: Path,
     agent_config: AgentConfig,
     task_id: str,
 ) -> AgentRunResult:
-    """Monitor agent activity and enforce timeouts.
+    """Stream subprocess output to file while monitoring for timeouts.
+
+    Uses read() with timeout instead of readline() since claude --print
+    may not output complete lines until the end.
 
     Args:
-        process: Running subprocess
-        log_file: Path to log file being written
+        process: Running subprocess with stdout=PIPE
+        log_file: Path to write output
         agent_config: Agent timeout/retry configuration
         task_id: Task identifier for logging
 
@@ -301,77 +304,117 @@ async def _monitor_agent_activity(
     """
     start_time = time.time()
     last_activity_time = start_time
-    last_log_size = 0
+    total_bytes_read = 0
 
-    while process.returncode is None:
-        await asyncio.sleep(5)  # Check every 5 seconds
-
-        current_time = time.time()
-        elapsed = current_time - start_time
+    async def read_and_write():
+        """Read from subprocess stdout in chunks and write to file."""
+        nonlocal last_activity_time, total_bytes_read
         
-        # Check max runtime
-        if elapsed > agent_config.max_runtime:
-            print(f"[{task_id}] Max runtime ({agent_config.max_runtime}s) exceeded, terminating...")
+        with open(log_file, "wb") as f:
+            while True:
+                try:
+                    # Read chunks (not lines) with timeout
+                    chunk = await asyncio.wait_for(
+                        process.stdout.read(4096),
+                        timeout=2.0
+                    )
+                    if not chunk:
+                        break  # EOF
+                    
+                    f.write(chunk)
+                    f.flush()  # Ensure we write immediately
+                    total_bytes_read += len(chunk)
+                    last_activity_time = time.time()
+                    
+                except asyncio.TimeoutError:
+                    # No data available, check if process is still running
+                    if process.returncode is not None:
+                        break
+                    continue
+                except Exception:
+                    break
+
+    async def monitor_timeouts():
+        """Monitor for inactivity and max runtime timeouts."""
+        while process.returncode is None:
+            await asyncio.sleep(5)  # Check every 5 seconds
+            
+            current_time = time.time()
+            elapsed = current_time - start_time
+            
+            # Check max runtime
+            if elapsed > agent_config.max_runtime:
+                print(f"[{task_id}] Max runtime ({agent_config.max_runtime}s) exceeded after {total_bytes_read} bytes, terminating...")
+                return "max_runtime"
+            
+            # Check inactivity timeout
+            inactivity_duration = current_time - last_activity_time
+            if inactivity_duration > agent_config.inactivity_timeout:
+                print(f"[{task_id}] No activity for {int(inactivity_duration)}s ({total_bytes_read} bytes total), terminating...")
+                return "inactivity"
+            
+            # Log progress periodically
+            if int(elapsed) % 60 == 0 and int(elapsed) > 0:
+                print(f"[{task_id}] Running for {int(elapsed)}s, {total_bytes_read} bytes output...")
+        
+        return None  # Process finished normally
+
+    # Run reader and monitor concurrently
+    reader_task = asyncio.create_task(read_and_write())
+    monitor_task = asyncio.create_task(monitor_timeouts())
+
+    # Wait for either completion or timeout
+    done, pending = await asyncio.wait(
+        [reader_task, monitor_task],
+        return_when=asyncio.FIRST_COMPLETED
+    )
+
+    timeout_type = None
+    
+    # Check if monitor detected a timeout
+    if monitor_task in done:
+        timeout_type = monitor_task.result()
+        if timeout_type:
+            # Timeout occurred - terminate process
             process.terminate()
             try:
                 await asyncio.wait_for(process.wait(), timeout=10)
             except asyncio.TimeoutError:
                 process.kill()
                 await process.wait()
-
-            log_content = log_file.read_text() if log_file.exists() else ""
-            return AgentRunResult(
-                success=False,
-                exit_code=-1,
-                session_id=_extract_session_id(log_content),
-                timeout_type="max_runtime",
-                output_lines=log_content.count('\n'),
-                duration_seconds=elapsed,
-            )
-
-        # Check for activity (log file growing)
-        if log_file.exists():
-            current_log_size = log_file.stat().st_size
-            if current_log_size > last_log_size:
-                last_log_size = current_log_size
-                last_activity_time = current_time
-
-        # Check inactivity timeout
-        inactivity_duration = current_time - last_activity_time
-        if inactivity_duration > agent_config.inactivity_timeout:
-            print(f"[{task_id}] No activity for {int(inactivity_duration)}s, terminating...")
-            process.terminate()
+            
+            # Cancel the reader
+            reader_task.cancel()
             try:
-                await asyncio.wait_for(process.wait(), timeout=10)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+                await reader_task
+            except asyncio.CancelledError:
+                pass
 
-            log_content = log_file.read_text() if log_file.exists() else ""
-            return AgentRunResult(
-                success=False,
-                exit_code=-1,
-                session_id=_extract_session_id(log_content),
-                timeout_type="inactivity",
-                output_lines=log_content.count('\n'),
-                duration_seconds=elapsed,
-            )
-
-        # Check if process finished
+    # If reader finished first, wait for process and cancel monitor
+    if reader_task in done:
+        monitor_task.cancel()
         try:
-            await asyncio.wait_for(process.wait(), timeout=0.1)
-        except asyncio.TimeoutError:
-            pass  # Still running
+            await monitor_task
+        except asyncio.CancelledError:
+            pass
+        await process.wait()
 
-    # Process completed normally
+    # Wait for any remaining pending tasks
+    for task in pending:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
     elapsed = time.time() - start_time
     log_content = log_file.read_text() if log_file.exists() else ""
     
     return AgentRunResult(
-        success=process.returncode == 0,
-        exit_code=process.returncode or 0,
+        success=process.returncode == 0 if timeout_type is None else False,
+        exit_code=process.returncode or -1,
         session_id=_extract_session_id(log_content),
-        timeout_type=None,
+        timeout_type=timeout_type,
         output_lines=log_content.count('\n'),
         duration_seconds=elapsed,
     )
@@ -411,45 +454,45 @@ async def run_agent(
     # Ensure log file exists for monitoring
     if log_file:
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        log_file.touch()
     else:
         # Create temp log file for monitoring
         log_file = worktree_path / ".claude-agent.log"
-        log_file.touch()
+    
+    # Initialize empty log file
+    log_file.write_text("")
 
-    log_handle = open(log_file, "w")
     start_time = time.time()
 
     try:
+        # Use PIPE to capture output and write to file ourselves
         process = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=worktree_path,
-            stdout=log_handle,
+            stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             stdin=asyncio.subprocess.DEVNULL if auto_approve else None,
         )
 
         if not auto_approve:
-            # Interactive mode - no monitoring, just wait
-            await process.wait()
+            # Interactive mode - no monitoring, just wait and capture
+            stdout, _ = await process.communicate()
             elapsed = time.time() - start_time
-            log_handle.close()
-            log_content = log_file.read_text() if log_file.exists() else ""
+            
+            # Write output to log file
+            output_text = stdout.decode() if stdout else ""
+            log_file.write_text(output_text)
+            
             return AgentRunResult(
                 success=process.returncode == 0,
                 exit_code=process.returncode or 0,
-                session_id=_extract_session_id(log_content),
-                output_lines=log_content.count('\n'),
+                session_id=_extract_session_id(output_text),
+                output_lines=output_text.count('\n'),
                 duration_seconds=elapsed,
             )
 
         # Auto-approve mode with activity monitoring
-        log_handle.close()  # Let the monitor read the file
-        
-        # Re-open in append mode for subprocess
-        log_handle = open(log_file, "a")
-        
-        result = await _monitor_agent_activity(
+        # Stream output to file while monitoring
+        result = await _stream_and_monitor(
             process, log_file, agent_config, task.id
         )
         return result
@@ -462,9 +505,6 @@ async def run_agent(
             timeout_type=None,
             duration_seconds=elapsed,
         )
-    finally:
-        if log_handle and not log_handle.closed:
-            log_handle.close()
 
 
 async def run_agent_with_resume(

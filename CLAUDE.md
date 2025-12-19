@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working with this repository.
 
 ## Project Overview
 
-Claude Orchestrator is a Python package for running parallel Claude Code agents on multiple tasks. Each task runs in its own git worktree with a dedicated agent instance.
+Claude Code Orchestrator is a Python package for running parallel Claude Code agents on multiple tasks. Each task runs in its own git worktree with a dedicated agent instance.
 
 ## Key Features
 

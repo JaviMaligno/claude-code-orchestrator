@@ -1,4 +1,4 @@
-# claude-orchestrator
+# claude-code-orchestrator
 
 Orchestrator for running parallel Claude Code agents on multiple tasks. Each task runs in its own git worktree with a dedicated agent instance.
 
@@ -16,13 +16,13 @@ Orchestrator for running parallel Claude Code agents on multiple tasks. Each tas
 
 ```bash
 # With pip
-pip install claude-orchestrator
+pip install claude-code-orchestrator
 
 # With uv
-uv add claude-orchestrator
+uv add claude-code-orchestrator
 
 # With pipx (for CLI usage)
-pipx install claude-orchestrator
+pipx install claude-code-orchestrator
 ```
 
 ## Prerequisites

@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "claude-orchestrator"
+name = "claude-code-orchestrator"
 version = "0.1.0"
 description = "Orchestrator for running parallel Claude Code agents on multiple tasks"
 readme = "README.md"
@@ -57,11 +57,11 @@ dev = [
 claude-orchestrator = "claude_orchestrator.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/JaviMaligno/claude-orchestrator"
-Repository = "https://github.com/JaviMaligno/claude-orchestrator"
-Documentation = "https://github.com/JaviMaligno/claude-orchestrator#readme"
-Issues = "https://github.com/JaviMaligno/claude-orchestrator/issues"
-Changelog = "https://github.com/JaviMaligno/claude-orchestrator/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/JaviMaligno/claude-code-orchestrator"
+Repository = "https://github.com/JaviMaligno/claude-code-orchestrator"
+Documentation = "https://github.com/JaviMaligno/claude-code-orchestrator#readme"
+Issues = "https://github.com/JaviMaligno/claude-code-orchestrator/issues"
+Changelog = "https://github.com/JaviMaligno/claude-code-orchestrator/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.sdist]
 include = [

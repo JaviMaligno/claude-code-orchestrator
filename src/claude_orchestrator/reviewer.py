@@ -19,6 +19,7 @@ from claude_orchestrator.orchestrator import (
     _extract_session_id,
     _stream_and_monitor,
     build_claude_args,
+    run_git,
 )
 
 
@@ -345,26 +346,22 @@ If all tests pass and code looks good:
 
 ## Your Task
 
-1. **Checkout the PR branch:**
-   ```bash
-   git fetch origin {pr.source_branch}
-   git checkout {pr.source_branch}
-   ```
+You are already on the PR branch `{pr.source_branch}` in an isolated worktree.
 
-2. **Review the code changes:**
+1. **Review the code changes:**
    - Check for correctness and potential bugs
    - Verify code follows project conventions
    - Look for missing error handling
    - Check for security issues
 
-3. **Run tests** (see Testing section below)
+2. **Run tests** (see Testing section below)
 
-4. **If issues found:**
+3. **If issues found:**
    - Fix the issues
    - Commit with message: `fix: <description>`
    - Push the changes
 
-5. **Add review comment** with your findings
+4. **Add review comment** with your findings
 
 {test_section}
 
@@ -400,6 +397,9 @@ async def run_reviewer_agent(
 ) -> AgentRunResult:
     """Run a Claude Code agent to review a PR.
 
+    Creates an isolated worktree for the PR branch to avoid conflicts
+    with the main repository.
+
     Args:
         pr: Pull request to review
         repo_root: Root directory of the repository
@@ -412,6 +412,46 @@ async def run_reviewer_agent(
     Returns:
         AgentRunResult with success status
     """
+    import time
+
+    # Create worktree for the PR branch
+    worktree_dir = config.worktree_dir
+    if worktree_dir.startswith("../"):
+        worktree_base = repo_root.parent / worktree_dir[3:]
+    elif worktree_dir.startswith("./"):
+        worktree_base = repo_root / worktree_dir[2:]
+    else:
+        worktree_base = (
+            Path(worktree_dir) if worktree_dir.startswith("/") else repo_root / worktree_dir
+        )
+    worktree_branch = f"review-pr-{pr.id}"
+
+    # Fetch the PR branch first
+    run_git(["fetch", "origin", pr.source_branch], cwd=repo_root)
+
+    # Create worktree from the PR source branch
+    worktree_path = worktree_base / worktree_branch
+    worktree_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Remove existing worktree if present
+    if worktree_path.exists():
+        run_git(["worktree", "remove", "--force", str(worktree_path)], cwd=repo_root)
+
+    # Create worktree tracking the remote PR branch
+    result = run_git(
+        ["worktree", "add", str(worktree_path), f"origin/{pr.source_branch}"],
+        cwd=repo_root,
+    )
+    if result.returncode != 0:
+        return AgentRunResult(
+            success=False,
+            exit_code=result.returncode,
+            duration_seconds=0,
+        )
+
+    # Checkout the branch (worktree is in detached HEAD from origin/branch)
+    run_git(["checkout", "-B", pr.source_branch, f"origin/{pr.source_branch}"], cwd=worktree_path)
+    run_git(["branch", "--set-upstream-to", f"origin/{pr.source_branch}"], cwd=worktree_path)
 
     prompt = build_reviewer_prompt(pr, config, automerge)
 
@@ -442,7 +482,7 @@ async def run_reviewer_agent(
     else:
         cmd.extend(["--print", "--verbose", "-p", prompt])
 
-    # Ensure log file exists
+    # Ensure log file exists (in main repo, not worktree)
     if log_file:
         log_file.parent.mkdir(parents=True, exist_ok=True)
     else:
@@ -451,14 +491,12 @@ async def run_reviewer_agent(
 
     log_file.write_text("")
 
-    import time
-
     start_time = time.time()
 
     try:
         process = await asyncio.create_subprocess_exec(
             *cmd,
-            cwd=repo_root,
+            cwd=worktree_path,  # Run in worktree
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             stdin=asyncio.subprocess.DEVNULL if auto_approve else None,
@@ -471,16 +509,19 @@ async def run_reviewer_agent(
             output_text = stdout.decode() if stdout else ""
             log_file.write_text(output_text)
 
-            return AgentRunResult(
+            result = AgentRunResult(
                 success=process.returncode == 0,
                 exit_code=process.returncode or 0,
                 session_id=_extract_session_id(output_text),
                 output_lines=output_text.count("\n"),
                 duration_seconds=elapsed,
             )
+        else:
+            # Auto-approve mode with monitoring
+            result = await _stream_and_monitor(
+                process, log_file, agent_config, f"review-pr-{pr.id}"
+            )
 
-        # Auto-approve mode with monitoring
-        result = await _stream_and_monitor(process, log_file, agent_config, f"review-pr-{pr.id}")
         return result
 
     except Exception:
@@ -490,6 +531,12 @@ async def run_reviewer_agent(
             exit_code=-1,
             duration_seconds=elapsed,
         )
+    finally:
+        # Cleanup worktree after review
+        try:
+            run_git(["worktree", "remove", "--force", str(worktree_path)], cwd=repo_root)
+        except Exception:
+            pass  # Best effort cleanup
 
 
 @dataclass

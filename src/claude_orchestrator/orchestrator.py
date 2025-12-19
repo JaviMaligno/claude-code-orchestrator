@@ -8,29 +8,27 @@ Features:
 - Retry with resume: Uses `claude --resume` to continue from where it left off
 - Parallel execution: Run multiple agents simultaneously
 """
+
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
-from claude_orchestrator.config import AgentConfig, Config, load_config
+from claude_orchestrator.config import AgentConfig, Config
 from claude_orchestrator.discovery import ProjectContext, discover_sync
 from claude_orchestrator.git_provider import (
-    GitProvider,
     GitProviderStatus,
     get_pr_instructions,
     get_provider_status,
 )
-from claude_orchestrator.task_generator import TaskConfig, TasksConfig, load_tasks_config
+from claude_orchestrator.task_generator import TaskConfig, TasksConfig
 
 
 @dataclass
@@ -39,8 +37,8 @@ class AgentRunResult:
 
     success: bool
     exit_code: int
-    session_id: Optional[str] = None  # For claude --resume
-    timeout_type: Optional[str] = None  # "inactivity" or "max_runtime"
+    session_id: str | None = None  # For claude --resume
+    timeout_type: str | None = None  # "inactivity" or "max_runtime"
     output_lines: int = 0
     duration_seconds: float = 0.0
 
@@ -52,14 +50,14 @@ class TaskResult:
     task_id: str
     status: str  # "success", "failed", "skipped", "timeout"
     branch: str
-    worktree_path: Optional[Path] = None
-    pr_url: Optional[str] = None
-    error: Optional[str] = None
+    worktree_path: Path | None = None
+    pr_url: str | None = None
+    error: str | None = None
     attempts: int = 0
-    session_id: Optional[str] = None
+    session_id: str | None = None
 
 
-def run_git(args: list[str], cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
+def run_git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
     """Run a git command and return result.
 
     Args:
@@ -81,7 +79,7 @@ def create_worktree(
     branch: str,
     worktree_dir: Path,
     base_branch: str = "main",
-    repo_root: Optional[Path] = None,
+    repo_root: Path | None = None,
 ) -> Path:
     """Create a git worktree for the given branch.
 
@@ -130,7 +128,7 @@ def create_worktree(
     return worktree_path
 
 
-def cleanup_worktree(branch: str, worktree_dir: Path, repo_root: Optional[Path] = None) -> None:
+def cleanup_worktree(branch: str, worktree_dir: Path, repo_root: Path | None = None) -> None:
     """Remove a git worktree.
 
     Args:
@@ -149,8 +147,8 @@ def cleanup_worktree(branch: str, worktree_dir: Path, repo_root: Optional[Path] 
 def build_agent_prompt(
     task: TaskConfig,
     provider_status: GitProviderStatus,
-    project_context: Optional[ProjectContext] = None,
-    config: Optional[Config] = None,
+    project_context: ProjectContext | None = None,
+    config: Config | None = None,
 ) -> str:
     """Build the prompt for a Claude Code agent.
 
@@ -176,7 +174,9 @@ def build_agent_prompt(
     # Agent instructions path
     agent_instructions = ""
     if config and config.project.agent_instructions:
-        agent_instructions = f"\nRead the instructions in {config.project.agent_instructions} before starting.\n"
+        agent_instructions = (
+            f"\nRead the instructions in {config.project.agent_instructions} before starting.\n"
+        )
 
     # Destination branch
     dest_branch = config.git.destination_branch if config else "main"
@@ -187,7 +187,9 @@ def build_agent_prompt(
         provider_status=provider_status,
         branch=task.branch,
         title=task.title,
-        description=task.description[:200] + "..." if len(task.description) > 200 else task.description,
+        description=task.description[:200] + "..."
+        if len(task.description) > 200
+        else task.description,
         dest_branch=dest_branch,
         repo_slug=repo_slug,
     )
@@ -216,7 +218,7 @@ Create a commit with a descriptive message following project conventions.
 """
 
 
-def build_claude_args(config: Optional[Config], auto_approve: bool = False) -> list[str]:
+def build_claude_args(config: Config | None, auto_approve: bool = False) -> list[str]:
     """Build Claude CLI arguments from config.
 
     Args:
@@ -259,7 +261,7 @@ def build_claude_args(config: Optional[Config], auto_approve: bool = False) -> l
     return args
 
 
-def _extract_session_id(log_content: str) -> Optional[str]:
+def _extract_session_id(log_content: str) -> str | None:
     """Extract Claude session ID from log output for resume capability.
 
     Args:
@@ -271,9 +273,9 @@ def _extract_session_id(log_content: str) -> Optional[str]:
     # Claude outputs session ID in format: "Session ID: abc123-def456..."
     # or in JSON output format
     patterns = [
-        r'Session ID[:\s]+([a-f0-9-]+)',
+        r"Session ID[:\s]+([a-f0-9-]+)",
         r'"session_id"[:\s]+"([a-f0-9-]+)"',
-        r'--resume\s+([a-f0-9-]+)',
+        r"--resume\s+([a-f0-9-]+)",
     ]
     for pattern in patterns:
         match = re.search(pattern, log_content, re.IGNORECASE)
@@ -292,12 +294,12 @@ def _format_json_event_for_log(event: dict) -> str:
         Human-readable string for logging
     """
     event_type = event.get("type", "unknown")
-    
+
     if event_type == "system" and event.get("subtype") == "init":
         session_id = event.get("session_id", "unknown")
         model = event.get("model", "unknown")
         return f"[INIT] Session: {session_id[:8]}... Model: {model}\n"
-    
+
     elif event_type == "assistant":
         msg = event.get("message", {})
         content = msg.get("content", [])
@@ -315,7 +317,7 @@ def _format_json_event_for_log(event: dict) -> str:
                 else:
                     lines.append(f"[TOOL] {tool_name}")
         return "\n".join(lines) + "\n" if lines else ""
-    
+
     elif event_type == "user":
         # Tool result
         tool_result = event.get("tool_use_result", {})
@@ -326,14 +328,14 @@ def _format_json_event_for_log(event: dict) -> str:
             if stdout:
                 return f"[RESULT] {stdout}\n"
         return ""
-    
+
     elif event_type == "result":
         result = event.get("result", "")
         if len(result) > 500:
             result = result[:500] + "..."
         duration = event.get("duration_ms", 0) / 1000
         return f"\n[COMPLETE] Duration: {duration:.1f}s\n{result}\n"
-    
+
     return ""
 
 
@@ -360,27 +362,24 @@ async def _stream_and_monitor(
     start_time = time.time()
     last_activity_time = start_time
     event_count = 0
-    session_id: Optional[str] = None
+    session_id: str | None = None
     line_buffer = b""
 
     async def read_and_process():
         """Read JSON lines from subprocess and convert to human-readable log."""
         nonlocal last_activity_time, event_count, session_id, line_buffer
-        
+
         with open(log_file, "w") as f:
             while True:
                 try:
                     # Read chunks with timeout
-                    chunk = await asyncio.wait_for(
-                        process.stdout.read(4096),
-                        timeout=2.0
-                    )
+                    chunk = await asyncio.wait_for(process.stdout.read(4096), timeout=2.0)
                     if not chunk:
                         break  # EOF
-                    
+
                     # Update activity time
                     last_activity_time = time.time()
-                    
+
                     # Add to buffer and process complete lines
                     line_buffer += chunk
                     while b"\n" in line_buffer:
@@ -388,23 +387,23 @@ async def _stream_and_monitor(
                         try:
                             event = json.loads(line.decode())
                             event_count += 1
-                            
+
                             # Extract session_id from init event
                             if event.get("type") == "system" and event.get("subtype") == "init":
                                 session_id = event.get("session_id")
-                            
+
                             # Convert to human-readable and write
                             readable = _format_json_event_for_log(event)
                             if readable:
                                 f.write(readable)
                                 f.flush()
-                                
+
                         except json.JSONDecodeError:
                             # Not valid JSON, write raw
                             f.write(line.decode() + "\n")
                             f.flush()
-                    
-                except asyncio.TimeoutError:
+
+                except TimeoutError:
                     if process.returncode is not None:
                         break
                     continue
@@ -416,27 +415,31 @@ async def _stream_and_monitor(
         last_reported_minute = 0
         while process.returncode is None:
             await asyncio.sleep(5)
-            
+
             current_time = time.time()
             elapsed = current_time - start_time
-            
+
             # Check max runtime
             if elapsed > agent_config.max_runtime:
-                print(f"[{task_id}] Max runtime ({agent_config.max_runtime}s) exceeded after {event_count} events, terminating...")
+                print(
+                    f"[{task_id}] Max runtime ({agent_config.max_runtime}s) exceeded after {event_count} events, terminating..."
+                )
                 return "max_runtime"
-            
+
             # Check inactivity timeout
             inactivity_duration = current_time - last_activity_time
             if inactivity_duration > agent_config.inactivity_timeout:
-                print(f"[{task_id}] No activity for {int(inactivity_duration)}s ({event_count} events total), terminating...")
+                print(
+                    f"[{task_id}] No activity for {int(inactivity_duration)}s ({event_count} events total), terminating..."
+                )
                 return "inactivity"
-            
+
             # Log progress every minute
             current_minute = int(elapsed) // 60
             if current_minute > last_reported_minute:
                 last_reported_minute = current_minute
                 print(f"[{task_id}] Running for {int(elapsed)}s, {event_count} events received...")
-        
+
         return None
 
     # Run reader and monitor concurrently
@@ -444,22 +447,21 @@ async def _stream_and_monitor(
     monitor_task = asyncio.create_task(monitor_timeouts())
 
     done, pending = await asyncio.wait(
-        [reader_task, monitor_task],
-        return_when=asyncio.FIRST_COMPLETED
+        [reader_task, monitor_task], return_when=asyncio.FIRST_COMPLETED
     )
 
     timeout_type = None
-    
+
     if monitor_task in done:
         timeout_type = monitor_task.result()
         if timeout_type:
             process.terminate()
             try:
                 await asyncio.wait_for(process.wait(), timeout=10)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 process.kill()
                 await process.wait()
-            
+
             reader_task.cancel()
             try:
                 await reader_task
@@ -483,13 +485,13 @@ async def _stream_and_monitor(
 
     elapsed = time.time() - start_time
     log_content = log_file.read_text() if log_file.exists() else ""
-    
+
     return AgentRunResult(
         success=process.returncode == 0 if timeout_type is None else False,
         exit_code=process.returncode or -1,
         session_id=session_id or _extract_session_id(log_content),
         timeout_type=timeout_type,
-        output_lines=log_content.count('\n'),
+        output_lines=log_content.count("\n"),
         duration_seconds=elapsed,
     )
 
@@ -498,10 +500,10 @@ async def run_agent(
     task: TaskConfig,
     worktree_path: Path,
     provider_status: GitProviderStatus,
-    project_context: Optional[ProjectContext] = None,
-    config: Optional[Config] = None,
+    project_context: ProjectContext | None = None,
+    config: Config | None = None,
     auto_approve: bool = False,
-    log_file: Optional[Path] = None,
+    log_file: Path | None = None,
 ) -> AgentRunResult:
     """Run Claude Code agent for a task with activity monitoring.
 
@@ -523,7 +525,7 @@ async def run_agent(
     # Build claude command with tools/permissions config
     cmd = ["claude"]
     cmd.extend(build_claude_args(config, auto_approve))
-    
+
     # Use stream-json for real-time monitoring in auto-approve mode
     if auto_approve:
         cmd.extend(["--print", "--output-format", "stream-json", "--verbose", "-p", prompt])
@@ -536,7 +538,7 @@ async def run_agent(
     else:
         # Create temp log file for monitoring
         log_file = worktree_path / ".claude-agent.log"
-    
+
     # Initialize empty log file
     log_file.write_text("")
 
@@ -556,27 +558,25 @@ async def run_agent(
             # Interactive mode - no monitoring, just wait and capture
             stdout, _ = await process.communicate()
             elapsed = time.time() - start_time
-            
+
             # Write output to log file
             output_text = stdout.decode() if stdout else ""
             log_file.write_text(output_text)
-            
+
             return AgentRunResult(
                 success=process.returncode == 0,
                 exit_code=process.returncode or 0,
                 session_id=_extract_session_id(output_text),
-                output_lines=output_text.count('\n'),
+                output_lines=output_text.count("\n"),
                 duration_seconds=elapsed,
             )
 
         # Auto-approve mode with activity monitoring
         # Stream output to file while monitoring
-        result = await _stream_and_monitor(
-            process, log_file, agent_config, task.id
-        )
+        result = await _stream_and_monitor(process, log_file, agent_config, task.id)
         return result
 
-    except Exception as e:
+    except Exception:
         elapsed = time.time() - start_time
         return AgentRunResult(
             success=False,
@@ -591,9 +591,9 @@ async def run_agent_with_resume(
     worktree_path: Path,
     provider_status: GitProviderStatus,
     session_id: str,
-    config: Optional[Config] = None,
+    config: Config | None = None,
     auto_approve: bool = False,
-    log_file: Optional[Path] = None,
+    log_file: Path | None = None,
 ) -> AgentRunResult:
     """Resume a Claude Code agent session.
 
@@ -610,14 +610,16 @@ async def run_agent_with_resume(
         AgentRunResult with success status
     """
     agent_config = config.agent if config else AgentConfig()
-    
+
     # Build resume command
     cmd = ["claude"]
     cmd.extend(build_claude_args(config, auto_approve))
-    
+
     # Use stream-json for real-time monitoring in auto-approve mode
     if auto_approve:
-        cmd.extend(["--resume", session_id, "--print", "--output-format", "stream-json", "--verbose"])
+        cmd.extend(
+            ["--resume", session_id, "--print", "--output-format", "stream-json", "--verbose"]
+        )
     else:
         cmd.extend(["--resume", session_id, "--print", "--verbose"])
 
@@ -644,29 +646,27 @@ async def run_agent_with_resume(
             stdout, _ = await process.communicate()
             elapsed = time.time() - start_time
             output_text = stdout.decode() if stdout else ""
-            
+
             # Append to log file
             with open(log_file, "a") as f:
                 f.write(output_text)
-            
+
             return AgentRunResult(
                 success=process.returncode == 0,
                 exit_code=process.returncode or 0,
                 session_id=session_id,
-                output_lines=output_text.count('\n'),
+                output_lines=output_text.count("\n"),
                 duration_seconds=elapsed,
             )
 
         # Auto-approve mode with stream monitoring
-        result = await _stream_and_monitor(
-            process, log_file, agent_config, task.id
-        )
+        result = await _stream_and_monitor(process, log_file, agent_config, task.id)
         # Preserve session ID for next retry
         if not result.session_id:
             result.session_id = session_id
         return result
 
-    except Exception as e:
+    except Exception:
         elapsed = time.time() - start_time
         return AgentRunResult(
             success=False,
@@ -674,9 +674,6 @@ async def run_agent_with_resume(
             session_id=session_id,
             duration_seconds=elapsed,
         )
-    finally:
-        if log_handle and not log_handle.closed:
-            log_handle.close()
 
 
 def push_branch(branch: str, worktree_path: Path) -> bool:
@@ -697,11 +694,11 @@ async def run_task(
     task: TaskConfig,
     config: Config,
     provider_status: GitProviderStatus,
-    project_context: Optional[ProjectContext] = None,
+    project_context: ProjectContext | None = None,
     auto_approve: bool = False,
     dry_run: bool = False,
     no_pr: bool = False,
-    logs_dir: Optional[Path] = None,
+    logs_dir: Path | None = None,
 ) -> TaskResult:
     """Run a single task end-to-end with retry support.
 
@@ -757,12 +754,11 @@ async def run_task(
         # Run agent with retry support
         attempt = 0
         max_attempts = agent_config.max_retries + 1
-        session_id: Optional[str] = None
-        last_result: Optional[AgentRunResult] = None
+        session_id: str | None = None
 
         while attempt < max_attempts:
             attempt += 1
-            
+
             if attempt > 1:
                 print(f"[{task.id}] Retry {attempt - 1}/{agent_config.max_retries}...")
                 await asyncio.sleep(agent_config.retry_delay)
@@ -791,15 +787,15 @@ async def run_task(
                     log_file=log_file,
                 )
 
-            last_result = result
-
             if result.success:
                 print(f"[{task.id}] Agent completed successfully in {result.duration_seconds:.1f}s")
                 break
 
             # Handle failure
             if result.timeout_type:
-                print(f"[{task.id}] Agent timed out ({result.timeout_type}) after {result.duration_seconds:.1f}s")
+                print(
+                    f"[{task.id}] Agent timed out ({result.timeout_type}) after {result.duration_seconds:.1f}s"
+                )
                 if result.session_id:
                     session_id = result.session_id
                     print(f"[{task.id}] Session ID captured for resume: {session_id[:8]}...")
@@ -812,8 +808,10 @@ async def run_task(
             if attempt >= max_attempts:
                 error_msg = f"Agent failed after {attempt} attempt(s)"
                 if result.timeout_type:
-                    error_msg = f"Agent timed out ({result.timeout_type}) after {attempt} attempt(s)"
-                
+                    error_msg = (
+                        f"Agent timed out ({result.timeout_type}) after {attempt} attempt(s)"
+                    )
+
                 return TaskResult(
                     task_id=task.id,
                     status="timeout" if result.timeout_type else "failed",
@@ -914,7 +912,7 @@ def print_summary(results: list[TaskResult]) -> None:
     success_count = sum(1 for r in results if r.status == "success")
     timeout_count = sum(1 for r in results if r.status == "timeout")
     failed_count = sum(1 for r in results if r.status == "failed")
-    
+
     print(f"\n{success_count}/{len(results)} tasks completed successfully")
     if timeout_count:
         print(f"{timeout_count} task(s) timed out")
@@ -925,7 +923,7 @@ def print_summary(results: list[TaskResult]) -> None:
 async def run_tasks(
     tasks_config: TasksConfig,
     config: Config,
-    task_ids: Optional[list[str]] = None,
+    task_ids: list[str] | None = None,
     auto_approve: bool = False,
     keep_worktrees: bool = False,
     dry_run: bool = False,
@@ -1029,7 +1027,7 @@ async def run_tasks(
 def run_tasks_sync(
     tasks_config: TasksConfig,
     config: Config,
-    task_ids: Optional[list[str]] = None,
+    task_ids: list[str] | None = None,
     auto_approve: bool = False,
     keep_worktrees: bool = False,
     dry_run: bool = False,
@@ -1063,4 +1061,3 @@ def run_tasks_sync(
             sequential,
         )
     )
-

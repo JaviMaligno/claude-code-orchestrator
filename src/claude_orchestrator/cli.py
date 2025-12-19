@@ -2,10 +2,10 @@
 
 Provides commands for initializing projects, generating tasks, and running agents.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.console import Console
@@ -13,31 +13,28 @@ from rich.table import Table
 
 from claude_orchestrator import __version__
 from claude_orchestrator.config import (
+    GLOBAL_CONFIG_FILE,
     Config,
     GitConfig,
-    WorkflowConfig,
     config_exists,
     load_config,
-    save_config,
     load_global_config,
+    save_config,
     save_global_config,
-    GLOBAL_CONFIG_FILE,
 )
 from claude_orchestrator.discovery import discover_sync
 from claude_orchestrator.git_provider import (
     GitProvider,
-    get_provider_status,
     get_default_branch,
-    get_current_branch,
+    get_provider_status,
 )
-from claude_orchestrator.mcp_registry import AuthType, get_all_mcp_statuses, get_mcp_status
+from claude_orchestrator.mcp_registry import AuthType, get_mcp_status
 from claude_orchestrator.orchestrator import run_tasks_sync
 from claude_orchestrator.task_generator import (
     generate_tasks_sync,
     load_tasks_config,
     save_tasks_config,
 )
-
 
 app = typer.Typer(
     name="claude-orchestrator",
@@ -76,7 +73,7 @@ def doctor(
         "-d",
         help="Project directory to check.",
     ),
-    mcps: Optional[str] = typer.Option(
+    mcps: str | None = typer.Option(
         None,
         "--mcps",
         "-m",
@@ -117,7 +114,9 @@ def doctor(
         console.print("  [green]✓[/green] .claude-orchestrator.yaml exists")
         config = load_config(project_dir)
     else:
-        console.print("  [yellow]○[/yellow] .claude-orchestrator.yaml not found (will use defaults)")
+        console.print(
+            "  [yellow]○[/yellow] .claude-orchestrator.yaml not found (will use defaults)"
+        )
         config = Config()
 
     # Check MCPs
@@ -136,35 +135,37 @@ def doctor(
     if provider_status.provider == GitProvider.BITBUCKET:
         status = get_mcp_status("bitbucket")
         if status.is_ready:
-            console.print(f"  [green]✓[/green] bitbucket: ready")
+            console.print("  [green]✓[/green] bitbucket: ready")
         elif status.is_configured:
-            console.print(f"  [green]✓[/green] bitbucket: configured")
+            console.print("  [green]✓[/green] bitbucket: configured")
         else:
-            console.print(f"  [red]✗[/red] bitbucket: not configured")
+            console.print("  [red]✗[/red] bitbucket: not configured")
             if status.setup_instructions:
                 console.print(f"      Setup:\n{status.setup_instructions}")
     elif provider_status.provider == GitProvider.GITHUB:
-        console.print(f"  [dim]○[/dim] Using gh CLI for GitHub (no MCP needed)")
+        console.print("  [dim]○[/dim] Using gh CLI for GitHub (no MCP needed)")
 
     # Get status of explicitly enabled MCPs from config
     for mcp_name in mcp_list:
         if mcp_name == "bitbucket":
             continue  # Already handled above
-        
+
         status = get_mcp_status(mcp_name)
 
         if status.is_ready:
             console.print(f"  [green]✓[/green] {mcp_name}: ready")
         elif status.is_configured:
             if status.auth_type == AuthType.OAUTH_BROWSER:
-                console.print(f"  [yellow]○[/yellow] {mcp_name}: configured (may need browser auth)")
+                console.print(
+                    f"  [yellow]○[/yellow] {mcp_name}: configured (may need browser auth)"
+                )
             else:
                 console.print(f"  [yellow]![/yellow] {mcp_name}: {status.message}")
         else:
             console.print(f"  [red]✗[/red] {mcp_name}: not configured")
             if status.setup_instructions:
                 console.print(f"      Setup:\n{status.setup_instructions}")
-    
+
     if not mcp_list and provider_status.provider != GitProvider.BITBUCKET:
         console.print("  [dim]○[/dim] No additional MCPs configured")
 
@@ -247,7 +248,7 @@ def init(
 
     # Save config
     save_config(config, project_dir)
-    console.print(f"\n[green]✓[/green] Created .claude-orchestrator.yaml")
+    console.print("\n[green]✓[/green] Created .claude-orchestrator.yaml")
 
     # Show next steps
     console.print("\n[bold]Next steps:[/bold]")
@@ -286,12 +287,12 @@ def generate(
     """Generate task configuration from a todo file.
 
     Uses Claude to analyze the todo file and generate task_config.yaml.
-    
+
     By default, uses Anthropic SDK with structured outputs if ANTHROPIC_API_KEY
     is set. Falls back to Claude CLI otherwise.
     """
     import os
-    
+
     if not from_todo.exists():
         console.print(f"[red]Error: Todo file not found: {from_todo}[/red]")
         raise typer.Exit(1)
@@ -339,7 +340,7 @@ def run(
         "-c",
         help="Path to task configuration file.",
     ),
-    from_todo: Optional[Path] = typer.Option(
+    from_todo: Path | None = typer.Option(
         None,
         "--from-todo",
         "-t",
@@ -356,7 +357,7 @@ def run(
         "--yolo",
         help="YOLO mode: generate, execute, and create PRs without stopping.",
     ),
-    tasks: Optional[str] = typer.Option(
+    tasks: str | None = typer.Option(
         None,
         "--tasks",
         help="Comma-separated task IDs to run (default: all).",
@@ -399,7 +400,7 @@ def run(
     """Run tasks using Claude Code agents.
 
     Each task runs in its own git worktree with a dedicated agent.
-    
+
     Workflow modes:
       - Default: Generate tasks, stop for review
       - --execute: Generate and execute, stop before PRs
@@ -407,7 +408,7 @@ def run(
     """
     # Load project config early for workflow settings
     config = load_config(project_dir)
-    
+
     # YOLO mode overrides everything
     if yolo:
         execute = True
@@ -501,7 +502,7 @@ def yolo(
         "-c",
         help="Path to task configuration file.",
     ),
-    tasks: Optional[str] = typer.Option(
+    tasks: str | None = typer.Option(
         None,
         "--tasks",
         help="Comma-separated task IDs to run (default: all).",
@@ -725,7 +726,9 @@ def config(
         elif key == "tools.allowed_tools":
             console.print(",".join(cfg.tools.allowed_tools) if cfg.tools.allowed_tools else "")
         elif key == "tools.disallowed_tools":
-            console.print(",".join(cfg.tools.disallowed_tools) if cfg.tools.disallowed_tools else "")
+            console.print(
+                ",".join(cfg.tools.disallowed_tools) if cfg.tools.disallowed_tools else ""
+            )
         elif key == "tools.skip_permissions":
             console.print(str(cfg.tools.skip_permissions).lower())
         elif key == "agent.inactivity_timeout":
@@ -836,7 +839,7 @@ def _set_nested_value(data: dict, key: str, value: str):
         if part not in current:
             current[part] = {}
         current = current[part]
-    
+
     # Handle comma-separated values for lists
     if parts[-1] == "enabled":
         current[parts[-1]] = [v.strip() for v in value.split(",")]
@@ -907,4 +910,3 @@ def status(
 
 if __name__ == "__main__":
     app()
-

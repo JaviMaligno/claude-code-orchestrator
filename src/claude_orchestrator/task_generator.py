@@ -3,15 +3,14 @@
 Parses todo.md files and generates task configurations for parallel execution.
 Supports structured outputs via Anthropic SDK when available.
 """
+
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import yaml
 from pydantic import BaseModel, Field
@@ -22,6 +21,7 @@ from claude_orchestrator.discovery import ProjectContext
 # Check if Anthropic SDK is available
 try:
     import anthropic
+
     HAS_ANTHROPIC = True
 except ImportError:
     HAS_ANTHROPIC = False
@@ -32,11 +32,21 @@ class TaskSchema(BaseModel):
     """Schema for a single task."""
 
     id: str = Field(description="Short, unique, kebab-case identifier (e.g., 'add-swagger-link')")
-    branch: str = Field(description="Branch name with feature/ prefix (e.g., 'feature/add-swagger-link')")
-    title: str = Field(description="Conventional commit title (e.g., 'feat: add swagger link to docs')")
-    description: str = Field(description="Detailed description with requirements and implementation hints")
-    files_hint: list[str] = Field(default_factory=list, description="List of files likely to be modified")
-    test_command: Optional[str] = Field(default=None, description="pytest command or null for UI-only changes")
+    branch: str = Field(
+        description="Branch name with feature/ prefix (e.g., 'feature/add-swagger-link')"
+    )
+    title: str = Field(
+        description="Conventional commit title (e.g., 'feat: add swagger link to docs')"
+    )
+    description: str = Field(
+        description="Detailed description with requirements and implementation hints"
+    )
+    files_hint: list[str] = Field(
+        default_factory=list, description="List of files likely to be modified"
+    )
+    test_command: str | None = Field(
+        default=None, description="pytest command or null for UI-only changes"
+    )
 
 
 class TasksConfigSchema(BaseModel):
@@ -55,7 +65,7 @@ class TaskConfig:
     title: str
     description: str
     files_hint: list[str] = field(default_factory=list)
-    test_command: Optional[str] = None
+    test_command: str | None = None
 
 
 @dataclass
@@ -66,7 +76,7 @@ class TasksConfig:
     tasks: list[TaskConfig] = field(default_factory=list)
 
 
-def _extract_yaml_from_output(output: str) -> Optional[str]:
+def _extract_yaml_from_output(output: str) -> str | None:
     """Extract YAML content from Claude output.
 
     Handles various output formats:
@@ -92,9 +102,7 @@ def _extract_yaml_from_output(output: str) -> Optional[str]:
         matches = pattern.findall(output)
         for match in matches:
             # Check if this looks like valid task config
-            if "settings:" in match and "tasks:" in match:
-                return match.strip()
-            elif "tasks:" in match:
+            if "settings:" in match and "tasks:" in match or "tasks:" in match:
                 return match.strip()
 
     # No fenced block found, try to extract by finding YAML markers
@@ -116,8 +124,8 @@ def _extract_yaml_from_output(output: str) -> Optional[str]:
 
 def build_generation_prompt(
     todo_content: str,
-    project_context: Optional[ProjectContext] = None,
-    config: Optional[Config] = None,
+    project_context: ProjectContext | None = None,
+    config: Config | None = None,
 ) -> str:
     """Build the prompt for task generation.
 
@@ -135,13 +143,13 @@ def build_generation_prompt(
         context_section = f"""
 ## Project Context
 Project: {project_context.project_name}
-Tech Stack: {', '.join(project_context.tech_stack)}
-Test Command: {project_context.test_command or 'Not configured'}
+Tech Stack: {", ".join(project_context.tech_stack)}
+Test Command: {project_context.test_command or "Not configured"}
 
 Key Files:
-{chr(10).join(f'- {f}' for f in project_context.key_files[:10])}
+{chr(10).join(f"- {f}" for f in project_context.key_files[:10])}
 
-Conventions: {project_context.conventions or 'Follow existing patterns'}
+Conventions: {project_context.conventions or "Follow existing patterns"}
 """
 
     # Get settings from config
@@ -214,7 +222,7 @@ Generate the task_config.yaml now:
 """
 
 
-def _build_settings(config: Optional[Config]) -> dict:
+def _build_settings(config: Config | None) -> dict:
     """Build settings dict from config.
 
     Args:
@@ -237,9 +245,9 @@ def _build_settings(config: Optional[Config]) -> dict:
 
 async def _generate_with_sdk(
     todo_content: str,
-    project_context: Optional[ProjectContext] = None,
-    config: Optional[Config] = None,
-) -> Optional[TasksConfig]:
+    project_context: ProjectContext | None = None,
+    config: Config | None = None,
+) -> TasksConfig | None:
     """Generate tasks using Anthropic SDK with structured outputs.
 
     Args:
@@ -258,9 +266,9 @@ async def _generate_with_sdk(
     if project_context:
         context_section = f"""
 Project: {project_context.project_name}
-Tech Stack: {', '.join(project_context.tech_stack)}
-Test Command: {project_context.test_command or 'Not configured'}
-Key Files: {', '.join(project_context.key_files[:10])}
+Tech Stack: {", ".join(project_context.tech_stack)}
+Test Command: {project_context.test_command or "Not configured"}
+Key Files: {", ".join(project_context.key_files[:10])}
 """
 
     prompt = f"""Analyze this todo list and generate tasks for parallel Claude Code agents.
@@ -321,9 +329,9 @@ Only include tasks that are NOT already marked as done/completed."""
 async def _generate_with_cli(
     todo_path: Path,
     todo_content: str,
-    project_context: Optional[ProjectContext] = None,
-    config: Optional[Config] = None,
-) -> Optional[TasksConfig]:
+    project_context: ProjectContext | None = None,
+    config: Config | None = None,
+) -> TasksConfig | None:
     """Generate tasks using Claude CLI (fallback method).
 
     Args:
@@ -395,7 +403,7 @@ async def _generate_with_cli(
             tasks=tasks,
         )
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return None
     except yaml.YAMLError:
         return None
@@ -405,10 +413,10 @@ async def _generate_with_cli(
 
 async def generate_tasks_with_claude(
     todo_path: Path,
-    project_context: Optional[ProjectContext] = None,
-    config: Optional[Config] = None,
+    project_context: ProjectContext | None = None,
+    config: Config | None = None,
     use_sdk: bool = True,
-) -> Optional[TasksConfig]:
+) -> TasksConfig | None:
     """Generate task configuration from a todo file using Claude.
 
     Uses Anthropic SDK with structured outputs if available,
@@ -440,10 +448,10 @@ async def generate_tasks_with_claude(
 
 def generate_tasks_sync(
     todo_path: Path,
-    project_context: Optional[ProjectContext] = None,
-    config: Optional[Config] = None,
+    project_context: ProjectContext | None = None,
+    config: Config | None = None,
     use_sdk: bool = True,
-) -> Optional[TasksConfig]:
+) -> TasksConfig | None:
     """Synchronous wrapper for task generation.
 
     Args:
@@ -484,7 +492,7 @@ def save_tasks_config(tasks_config: TasksConfig, output_path: Path) -> None:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
 
-def load_tasks_config(config_path: Path) -> Optional[TasksConfig]:
+def load_tasks_config(config_path: Path) -> TasksConfig | None:
     """Load tasks configuration from a YAML file.
 
     Args:
@@ -523,4 +531,3 @@ def load_tasks_config(config_path: Path) -> Optional[TasksConfig]:
 
     except Exception:
         return None
-

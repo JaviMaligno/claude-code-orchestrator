@@ -3,14 +3,13 @@
 Automatically analyzes project structure, conventions, and key files
 using Claude to generate dynamic context for task execution.
 """
+
 from __future__ import annotations
 
 import asyncio
 import json
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from claude_orchestrator.git_provider import GitProvider, detect_provider
 
@@ -21,7 +20,7 @@ class ProjectContext:
 
     project_name: str
     key_files: list[str] = field(default_factory=list)
-    test_command: Optional[str] = None
+    test_command: str | None = None
     conventions: str = ""
     tech_stack: list[str] = field(default_factory=list)
     git_provider: GitProvider = GitProvider.UNKNOWN
@@ -98,7 +97,7 @@ def infer_tech_stack(project_files: dict[str, bool]) -> list[str]:
     return stack
 
 
-def infer_test_command(project_files: dict[str, bool], project_root: Path) -> Optional[str]:
+def infer_test_command(project_files: dict[str, bool], project_root: Path) -> str | None:
     """Infer test command from project files.
 
     Args:
@@ -245,7 +244,7 @@ async def discover_with_claude(project_root: Path) -> ProjectContext:
             has_readme=quick_context.has_readme,
         )
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return quick_context
     except json.JSONDecodeError:
         return quick_context
@@ -267,4 +266,3 @@ def discover_sync(project_root: Path, use_claude: bool = True) -> ProjectContext
         return quick_discover(project_root)
 
     return asyncio.run(discover_with_claude(project_root))
-

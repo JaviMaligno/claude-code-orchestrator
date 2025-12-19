@@ -3,13 +3,13 @@
 Auto-detects whether the repository is on Bitbucket or GitHub,
 and verifies the appropriate tools are installed and authenticated.
 """
+
 from __future__ import annotations
 
 import shutil
 import subprocess
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
 
 
 class GitProvider(Enum):
@@ -27,11 +27,11 @@ class GitProviderStatus:
     provider: GitProvider
     is_ready: bool
     tool: str  # "mcp-server-bitbucket" or "gh"
-    error: Optional[str] = None
-    repo_info: Optional[dict] = None  # Extracted repo info (owner, repo, etc.)
+    error: str | None = None
+    repo_info: dict | None = None  # Extracted repo info (owner, repo, etc.)
 
 
-def detect_provider(cwd: Optional[str] = None) -> GitProvider:
+def detect_provider(cwd: str | None = None) -> GitProvider:
     """Detect git provider from remote URL.
 
     Args:
@@ -62,7 +62,7 @@ def detect_provider(cwd: Optional[str] = None) -> GitProvider:
         return GitProvider.UNKNOWN
 
 
-def get_current_branch(cwd: Optional[str] = None) -> Optional[str]:
+def get_current_branch(cwd: str | None = None) -> str | None:
     """Get the current git branch.
 
     Args:
@@ -85,7 +85,7 @@ def get_current_branch(cwd: Optional[str] = None) -> Optional[str]:
         return None
 
 
-def get_default_branch(cwd: Optional[str] = None) -> Optional[str]:
+def get_default_branch(cwd: str | None = None) -> str | None:
     """Get the default branch from remote origin.
 
     Args:
@@ -106,7 +106,7 @@ def get_default_branch(cwd: Optional[str] = None) -> Optional[str]:
             for line in result.stdout.split("\n"):
                 if "HEAD branch:" in line:
                     return line.split(":")[-1].strip()
-        
+
         # Fallback: check common branch names
         for branch in ["main", "master", "develop"]:
             result = subprocess.run(
@@ -117,13 +117,13 @@ def get_default_branch(cwd: Optional[str] = None) -> Optional[str]:
             )
             if result.returncode == 0:
                 return branch
-        
+
         return None
     except Exception:
         return None
 
 
-def parse_remote_url(cwd: Optional[str] = None) -> Optional[dict]:
+def parse_remote_url(cwd: str | None = None) -> dict | None:
     """Parse git remote URL to extract owner and repo.
 
     Args:
@@ -167,7 +167,7 @@ def parse_remote_url(cwd: Optional[str] = None) -> Optional[dict]:
         return None
 
 
-def check_github_cli() -> tuple[bool, Optional[str]]:
+def check_github_cli() -> tuple[bool, str | None]:
     """Check if gh CLI is installed and authenticated.
 
     Returns:
@@ -188,17 +188,14 @@ def check_github_cli() -> tuple[bool, Optional[str]]:
             text=True,
         )
         if result.returncode != 0:
-            return False, (
-                "gh CLI not authenticated.\n"
-                "Run: gh auth login"
-            )
+            return False, ("gh CLI not authenticated.\nRun: gh auth login")
 
         return True, None
     except Exception as e:
         return False, f"Error checking gh auth status: {e}"
 
 
-def check_bitbucket_mcp() -> tuple[bool, Optional[str]]:
+def check_bitbucket_mcp() -> tuple[bool, str | None]:
     """Check if Bitbucket MCP is configured.
 
     Returns:
@@ -213,8 +210,7 @@ def check_bitbucket_mcp() -> tuple[bool, Optional[str]]:
 
         if result.returncode != 0:
             return False, (
-                "Could not check MCP configuration.\n"
-                "Ensure Claude CLI is installed and working."
+                "Could not check MCP configuration.\nEnsure Claude CLI is installed and working."
             )
 
         if "bitbucket" not in result.stdout.lower():
@@ -231,15 +227,12 @@ def check_bitbucket_mcp() -> tuple[bool, Optional[str]]:
 
         return True, None
     except FileNotFoundError:
-        return False, (
-            "Claude CLI not found.\n"
-            "Ensure Claude Code is installed."
-        )
+        return False, ("Claude CLI not found.\nEnsure Claude Code is installed.")
     except Exception as e:
         return False, f"Error checking Bitbucket MCP: {e}"
 
 
-def get_provider_status(cwd: Optional[str] = None) -> GitProviderStatus:
+def get_provider_status(cwd: str | None = None) -> GitProviderStatus:
     """Get full status of git provider and tools.
 
     Args:
@@ -286,7 +279,7 @@ def get_pr_instructions(
     title: str,
     description: str,
     dest_branch: str = "main",
-    repo_slug: Optional[str] = None,
+    repo_slug: str | None = None,
 ) -> str:
     """Get provider-specific PR creation instructions for agents.
 
@@ -349,4 +342,3 @@ Push your branch and create the PR manually in the web interface:
 git push -u origin <branch>
 ```
 """
-

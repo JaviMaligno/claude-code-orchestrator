@@ -3,13 +3,13 @@
 Manages MCP definitions, checks configuration status, and provides
 setup instructions for various MCPs.
 """
+
 from __future__ import annotations
 
 import os
 import subprocess
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
 
 
 class AuthType(Enum):
@@ -28,7 +28,7 @@ class MCPDefinition:
     package: str  # PyPI or npm package name
     auth_type: AuthType
     env_vars: list[str] = field(default_factory=list)  # Required env vars for ENV_VARS type
-    check_command: Optional[str] = None  # Command to check if ready
+    check_command: str | None = None  # Command to check if ready
     setup_instructions: str = ""
     is_npm: bool = False  # True if this is an npm package
 
@@ -167,8 +167,8 @@ class MCPStatus:
     is_configured: bool
     is_ready: bool
     auth_type: AuthType
-    message: Optional[str] = None
-    setup_instructions: Optional[str] = None
+    message: str | None = None
+    setup_instructions: str | None = None
 
 
 def get_mcp_status(name: str) -> MCPStatus:
@@ -248,8 +248,8 @@ def register_custom_mcp(
     name: str,
     package: str,
     auth_type: AuthType,
-    env_vars: Optional[list[str]] = None,
-    check_command: Optional[str] = None,
+    env_vars: list[str] | None = None,
+    check_command: str | None = None,
     setup_instructions: str = "",
     is_npm: bool = False,
 ) -> None:
@@ -275,7 +275,7 @@ def register_custom_mcp(
     )
 
 
-def get_all_mcp_statuses(names: Optional[list[str]] = None) -> list[MCPStatus]:
+def get_all_mcp_statuses(names: list[str] | None = None) -> list[MCPStatus]:
     """Get status of multiple MCPs.
 
     Args:
@@ -288,4 +288,3 @@ def get_all_mcp_statuses(names: Optional[list[str]] = None) -> list[MCPStatus]:
         names = list(MCP_REGISTRY.keys())
 
     return [get_mcp_status(name) for name in names]
-

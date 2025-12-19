@@ -4,16 +4,16 @@ Handles loading, saving, and validating configuration:
 - Global: ~/.config/claude-orchestrator/config.yaml
 - Project: .claude-orchestrator.yaml
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import yaml
 
 from claude_orchestrator.mcp_registry import AuthType, register_custom_mcp
-
 
 CONFIG_FILENAME = ".claude-orchestrator.yaml"
 GLOBAL_CONFIG_DIR = Path.home() / ".config" / "claude-orchestrator"
@@ -27,9 +27,9 @@ class GitConfig:
     provider: str = "auto"  # "auto", "bitbucket", "github"
     base_branch: str = "main"
     destination_branch: str = "main"
-    repo_slug: Optional[str] = None  # Required for Bitbucket
-    owner: Optional[str] = None  # For GitHub
-    repo: Optional[str] = None  # For GitHub
+    repo_slug: str | None = None  # Required for Bitbucket
+    owner: str | None = None  # For GitHub
+    repo: str | None = None  # For GitHub
 
 
 @dataclass
@@ -39,17 +39,17 @@ class AgentConfig:
     # Inactivity timeout in seconds (no output = agent is stuck)
     # Default: 300s (5 minutes)
     inactivity_timeout: int = 300
-    
+
     # Total timeout for an agent task in seconds
     # Default: 3600s (1 hour)
     max_runtime: int = 3600
-    
+
     # Number of retry attempts on timeout or failure
     max_retries: int = 2
-    
+
     # Whether to use claude --resume for retries (preserves session state)
     use_resume: bool = True
-    
+
     # Delay between retries in seconds
     retry_delay: int = 5
 
@@ -60,14 +60,14 @@ class WorkflowConfig:
 
     # Execution mode: "review" (stop after each step), "yolo" (run everything)
     mode: str = "review"
-    
+
     # Fine-grained stop points (only apply in "review" mode)
     stop_after_generate: bool = True  # Stop after generating tasks
     stop_after_run: bool = False  # Stop after running tasks (before PRs)
-    
+
     # Auto-approve agent actions (dangerous but fast)
     auto_approve: bool = False
-    
+
     # Create PRs automatically
     auto_pr: bool = True
 
@@ -78,20 +78,20 @@ class ToolsConfig:
 
     # Permission mode: default, acceptEdits, plan, dontAsk, bypassPermissions
     permission_mode: str = "default"
-    
+
     # Allowed CLI tools (e.g., ["gh", "az", "aws", "docker"])
     # These get added to --allowedTools as Bash patterns
     allowed_cli: list[str] = field(default_factory=list)
-    
+
     # Explicitly allowed tools (e.g., ["Bash(git:*)", "Edit", "Read"])
     allowed_tools: list[str] = field(default_factory=list)
-    
+
     # Explicitly disallowed tools (e.g., ["Bash(rm:*)"])
     disallowed_tools: list[str] = field(default_factory=list)
-    
+
     # Additional directories to allow access
     add_dirs: list[str] = field(default_factory=list)
-    
+
     # Dangerously skip all permissions (only for sandboxed environments)
     skip_permissions: bool = False
 
@@ -109,8 +109,8 @@ class ProjectConfig:
     """Project context configuration."""
 
     key_files: list[str] = field(default_factory=list)
-    test_command: Optional[str] = None
-    agent_instructions: Optional[str] = None
+    test_command: str | None = None
+    agent_instructions: str | None = None
 
 
 @dataclass
@@ -126,7 +126,7 @@ class Config:
     agent: AgentConfig = field(default_factory=AgentConfig)
 
     # Runtime settings (not persisted)
-    project_root: Optional[Path] = None
+    project_root: Path | None = None
 
 
 def _merge_configs(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -175,7 +175,7 @@ def save_global_config(data: dict[str, Any]) -> None:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
 
-def load_config(project_root: Optional[Path] = None) -> Config:
+def load_config(project_root: Path | None = None) -> Config:
     """Load configuration from .claude-orchestrator.yaml with global fallbacks.
 
     Configuration is loaded in this order (later overrides earlier):
@@ -197,7 +197,7 @@ def load_config(project_root: Optional[Path] = None) -> Config:
 
     # Load global config first
     global_data = load_global_config()
-    
+
     # Load project config
     project_data: dict[str, Any] = {}
     if config_path.exists():
@@ -293,7 +293,7 @@ def load_config(project_root: Optional[Path] = None) -> Config:
     return config
 
 
-def save_config(config: Config, project_root: Optional[Path] = None) -> None:
+def save_config(config: Config, project_root: Path | None = None) -> None:
     """Save configuration to .claude-orchestrator.yaml.
 
     Args:
@@ -395,7 +395,7 @@ def save_config(config: Config, project_root: Optional[Path] = None) -> None:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
 
-def config_exists(project_root: Optional[Path] = None) -> bool:
+def config_exists(project_root: Path | None = None) -> bool:
     """Check if configuration file exists.
 
     Args:
@@ -408,4 +408,3 @@ def config_exists(project_root: Optional[Path] = None) -> bool:
         project_root = Path.cwd()
 
     return (project_root / CONFIG_FILENAME).exists()
-
